@@ -1,0 +1,33 @@
+{
+  "created_utc": "2026-07-09T09:55:22.429997+00:00",
+  "host": "lenovo-ThinkStation-K-C3",
+  "curves_dir": "/mnt/data_hdd/MSH_ANT_Final/04DispersionData/2014/1D_1D/RemoveSpikes/Curves/curves_all_finalct001",
+  "measurements_csv": null,
+  "target_periods_s": [
+    3.0,
+    3.5,
+    4.0
+  ],
+  "max_distance_km": 0.0,
+  "plot_max_distance_km": 30.0,
+  "max_time_s": 0.0,
+  "plot_max_time_s": 12,
+  "min_snr": 4.0,
+  "group_velocity_min_km_s": 0.0,
+  "group_velocity_max_rule_km_s": "3.0 for T<4.5s, 3.3 for T>=4.5s",
+  "min_wavelengths": 1.0,
+  "wavelength_screen_enabled": true,
+  "wavelength_filter_mode": "distance_reference",
+  "one_wavelength_rule": "D >= 1 * V_ref(T) * T; V_ref(T) is fit from SNR/group-velocity screened rows before the distance cutoff",
+  "left_column_filter": "SNR and group velocity only",
+  "right_column_filter": "left-column rows plus reference-wavelength distance cutoff and period correction",
+  "period_correction": "branch_n = round((D / Vref - t_raw) / T); t_corrected = t_raw + branch_n * T",
+  "reference_velocity_rule": "through-origin fit from left-screened rows for each period; Wang reference is comparison only",
+  "disperpicker_final_ct": 0.01,
+  "wang_reference_velocities_km_s": {
+    "3.0": 2.7,
+    "4.0": 2.9,
+    "5.0": 3.05
+  },
+  "input_cdisp_measurements": 228833
+}

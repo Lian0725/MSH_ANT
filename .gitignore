@@ -1,0 +1,68 @@
+# ============================================================
+# MSH_ANT 仓库 .gitignore
+# 本仓库仅存放：代码 + 关键最终图表 + 筛选/反演结果 CSV/NPZ
+# 原始波形、预处理波形、互相关叠加、频散中间产物均不追踪
+# ============================================================
+
+# ---------- 波形与地震数据（体积大，另存本地/服务器）----------
+*.h5
+*.hdf5
+*.mseed
+*.msd
+*.SAC
+*.sac
+*.seed
+
+# ---------- 频散中间产物（每台对每周期一份，数十万文件）----------
+# NPZ 频散能量矩阵（DispersionNPZ 下的中间产物；05Inversion 结果 NPZ 是最终产物需单独 !white-list）
+04DispersionData/*/*/*/DispersionNPZ/
+04DispersionData/*/*/*/DatData/
+04DispersionData/*/*/*/Curves/
+03CC_StackData/*/*/*/CC/
+03CC_StackData/*/*/*/Stack/
+
+# ---------- 反演大二进制产物（保留 CSV+PNG+NPZ 结果，屏蔽临时中间态）----------
+inversion/tomo2d/output/
+inversion/depth_inversion/output/
+
+# ---------- 备份文件 ----------
+*.bak
+*.bak.*
+*.orig
+*~
+
+# ---------- Python ----------
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+*.so
+.venv/
+env/
+venv/
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---------- IDE ----------
+.vscode/
+.idea/
+*.code-workspace
+
+# ---------- 临时/日志 ----------
+*.tmp
+*.log
+tmp/
+.cache/
+
+# ---------- 敏感/本地配置 ----------
+*.env
+.env.*
+credentials.yaml
+secrets.yaml

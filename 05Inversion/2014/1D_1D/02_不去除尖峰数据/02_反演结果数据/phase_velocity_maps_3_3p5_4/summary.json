@@ -1,0 +1,93 @@
+{
+  "method": "Wang Figure 5/6 style maps from DisperPicker paper-standard corrected measurements",
+  "measurements_csv": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/2014/1D_1D/02_不去除尖峰数据/01_筛选后数据/figure4_screening/measurements_period_corrected.csv",
+  "curves_dir": "/mnt/data_hdd/MSH_ANT_Final/04DispersionData/2014/1D_1D/NonRemoveSpikes/Curves/curves_all_finalct001",
+  "output_dir": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/2014/1D_1D/02_不去除尖峰数据/02_反演结果数据/phase_velocity_maps_3_3p5_4",
+  "periods": {
+    "3.0": {
+      "input_corrected_count": 25381,
+      "clipped_path_count": 25381,
+      "ray_count_max_per_grid": 2922.0,
+      "path_velocity_p05_p50_p95": [
+        2.56,
+        2.795,
+        3.095
+      ],
+      "visible_model_p02_p50_p98": [
+        2.562104556974384,
+        2.793899235724851,
+        3.3477123713976233
+      ],
+      "ref_velocity_km_s": 2.795,
+      "residual_mad_s": 0.21731186427710208
+    },
+    "3.5": {
+      "input_corrected_count": 22902,
+      "clipped_path_count": 22902,
+      "ray_count_max_per_grid": 2621.0,
+      "path_velocity_p05_p50_p95": [
+        2.595,
+        2.8550000000000004,
+        3.25
+      ],
+      "visible_model_p02_p50_p98": [
+        2.5871976247546113,
+        2.86565158751404,
+        3.529906234028556
+      ],
+      "ref_velocity_km_s": 2.8550000000000004,
+      "residual_mad_s": 0.25392975242579285
+    },
+    "4.0": {
+      "input_corrected_count": 18809,
+      "clipped_path_count": 18809,
+      "ray_count_max_per_grid": 2160.0,
+      "path_velocity_p05_p50_p95": [
+        2.6499999999999995,
+        2.935,
+        3.415
+      ],
+      "visible_model_p02_p50_p98": [
+        2.6215245798224203,
+        2.95511110144096,
+        3.651729978209474
+      ],
+      "ref_velocity_km_s": 2.935,
+      "residual_mad_s": 0.30084753756169075
+    }
+  },
+  "parameters": {
+    "periods": [
+      3.0,
+      3.5,
+      4.0
+    ],
+    "bbox": {
+      "minlon": -122.34,
+      "minlat": 46.08,
+      "maxlon": -122.04,
+      "maxlat": 46.32
+    },
+    "grid_spacing_deg": 0.01,
+    "min_inside_km": 0.5,
+    "sample_step_km": 0.25,
+    "damping": 8.0,
+    "smoothing": 30.0,
+    "robust_iterations": 4,
+    "coverage_contour": 20.0,
+    "coverage_vmax": 1000.0
+  },
+  "figures": {
+    "figure5_style": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/Report/2014/1D_1D/03_图片/02_不去除尖峰/02_二维相速度图/Figure5风格_测量值与射线路径覆盖.png",
+    "figure6_style": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/Report/2014/1D_1D/03_图片/02_不去除尖峰/02_二维相速度图/Figure6风格_二维相速度图.png",
+    "figure6_style_paper_smooth_square": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/Report/2014/1D_1D/03_图片/02_不去除尖峰/02_二维相速度图/Figure6风格_二维相速度图.png"
+  },
+  "plot_data": {
+    "figure6_paper_smooth_square_npz": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/2014/1D_1D/02_不去除尖峰数据/02_反演结果数据/phase_velocity_maps_3_3p5_4/data/wang_figure6_plot_data_paper_smooth_square.npz"
+  },
+  "report_images": {
+    "screening_figure4": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/Report/2014/1D_1D/03_图片/02_不去除尖峰/01_筛选图/Wang风格Figure4筛选结果.png",
+    "figure5_style": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/Report/2014/1D_1D/03_图片/02_不去除尖峰/02_二维相速度图/Figure5风格_测量值与射线路径覆盖.png",
+    "figure6_style": "/mnt/data_hdd/MSH_ANT_Final/05Inversion/Report/2014/1D_1D/03_图片/02_不去除尖峰/02_二维相速度图/Figure6风格_二维相速度图.png"
+  }
+}

@@ -1,0 +1,32 @@
+<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><title>Moveout 去尖峰前后对比</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:1120px;margin:24px auto;padding:0 18px;color:#172033;line-height:1.65}
+img{max-width:100%;border:1px solid #cbd5e1}
+code{background:#f1f5f9;padding:2px 4px}
+.note{background:#eff6ff;border:1px solid #60a5fa;padding:12px}
+.warn{background:#fff7ed;border:1px solid #f59e0b;padding:12px}
+</style></head><body>
+<h1>Moveout 去尖峰前后对比</h1>
+<div class='note'>
+计算主机：<code>lenovo-ThinkStation-K-C3</code>。原始 STACK 只读保留在 <code>/mnt/data_hdd/MSH_ANT/stack/2014/1D_WANG_PWS_150s_20260620/STACK</code>，去尖峰后的 moveout 子集副本写到 <code>/mnt/data_hdd/MSH_ANT/parameter_tests/1d_moveout_before_after_spike_removal_20260625_fixed/stack_cleaned_subset</code>。<br>
+虚拟源：<code>1D.4529</code>。经纬度范围：<code>minlat=46.1384</code>, <code>maxlat=46.1595</code>, <code>minlon=-122.3363</code>, <code>maxlon=-122.0297</code>。<br>
+参与 moveout 的接收台数量：<b>172</b>；最大台距：<b>20.20 km</b>。<br>
+尖峰模板来源：<b>diagnostic</b>；固定相位：<b>0.00 s</b>；用于识别模板的 1D 台站对：<b>402309</b>/<b>402423</b>。<br>
+缓存文件：<code>/mnt/data_hdd/MSH_ANT_Final/03CC_StackData/Reports/images/moveout_before_after_data.npz</code>；本次输出直接从 NPZ 重绘。<br>
+目录结构：图片与缓存数据放在 <code>/mnt/data_hdd/MSH_ANT_Final/03CC_StackData/Reports/images</code>，代码副本放在 <code>/mnt/data_hdd/MSH_ANT_Final/03CC_StackData/Reports/code</code>。
+</div>
+<div class='warn'>
+这里为了稳妥，没有改写整套原始 STACK，而是只对当前 moveout 用到的台站对子集生成了一份去尖峰副本。这样既保留了去除前的数据，也能直接看 before/after moveout 的差异。以后如果只是调颜色、改参考线或改版式，可以直接读这个 NPZ，不需要重新回读全部叠加波形。
+</div>
+<h2>Before / After 并排对比</h2>
+<img src='images/moveout_before_after_compare.png'>
+<h2>单独查看</h2>
+<p>去尖峰前：</p>
+<img src='images/moveout_before.png'>
+<p>去尖峰后：</p>
+<img src='images/moveout_after.png'>
+<h2>幅度拟合统计</h2>
+<p>每个台站对不是用同一个固定振幅硬减，而是先拟合模板幅度再相减。拟合系数中位数 <b>-0.000</b>，绝对值中位数 <b>0.001</b>。详细见 <code>images/spike_scales.csv</code>。</p>
+<h2>尖峰显影前后图</h2><p>这张图是尖峰最明显的一版 before/after 对比图。左侧为去尖峰前，右侧为去尖峰后，用来直观看 1 s 重复尖峰是否被压下去。</p><img src='images/integer_spike_contrast_before_after.png'><h2>相干叠加前后图</h2><p>这张图保留原始 coherent 叠加前后对比，可辅助判断去尖峰是否同时改变了主波形整体形态。</p><img src='images/coherent_before_after.png'><h2>尖峰模板图</h2><p>这是用于减除 1 s 重复尖峰的模板图。实际处理时不是用固定振幅硬减，而是每条道先拟合尺度，再减去 scale × template。</p><img src='images/spike_template.png'><h2>去除尖峰的代码</h2><p>下面这些代码文件已经放在当前目录，报告里直接给出入口，后续查实现或继续改图时不需要再回主项目里找。</p><ul><li><a href='code/detect_1s_spikes_wang_style.py'><code>detect_1s_spikes_wang_style.py</code></a>：负责 1 s 重复尖峰的诊断、模板构建和幅度拟合。</li><li><a href='code/apply_spike_removal_moveout_compare.py'><code>apply_spike_removal_moveout_compare.py</code></a>：负责把模板减除应用到 moveout 子集，并输出 before/after 对比图和报告。</li></ul>
+<h2>Wang Figure 3 四联图</h2><p>这里补充保存 Wang Figure 3 的统一四联图、4 张单图、绘图代码和 4 个对应 NPZ 数值文件，方便后续直接改图。</p><p><code>wang_figure3_four_panel_uniform.png</code></p><img src='images/wang_figure3_uniform/wang_figure3_four_panel_uniform.png'><h2>Wang Figure 3 单图</h2><p><code>panel_a.png</code></p><img src='images/wang_figure3_uniform/panel_a.png'><p><code>panel_b.png</code></p><img src='images/wang_figure3_uniform/panel_b.png'><p><code>panel_c.png</code></p><img src='images/wang_figure3_uniform/panel_c.png'><p><code>panel_d.png</code></p><img src='images/wang_figure3_uniform/panel_d.png'><h2>Wang Figure 3 绘图代码</h2><p>这组四联图的重绘代码和拼图代码都保存在这里，后续如果只想改版式、字号或布局，可以直接改这些脚本。</p><ul><li><a href='code/wang_figure3_uniform/render_wang_figure3_from_npz.py'><code>render_wang_figure3_from_npz.py</code></a>：从 4 个 NPZ 数值文件直接重绘 panel A-D，并输出统一尺寸的四联图。</li><li><a href='code/wang_figure3_uniform/compose_wang_figure3_panels.py'><code>compose_wang_figure3_panels.py</code></a>：把已经生成好的 4 张单图再次拼成统一 2×2 组合图。</li><li><a href='code/wang_figure3_uniform/panel_data_index.md'><code>panel_data_index.md</code></a>：记录 panel A-D 对应的原始图片来源、NPZ 路径和数组键名。</li></ul><h2>Wang Figure 3 NPZ 数据</h2><p>下面 4 个 NPZ 是对应单图的数值缓存。后续改图时优先读这些文件，不需要重新从更上游结果再推一次。</p><ul><li><a href='images/wang_figure3_uniform/wang_figure3a_panel_data.npz'><code>wang_figure3a_panel_data.npz</code></a>：Panel A 的距离分箱诊断残差数据。</li><li><a href='images/wang_figure3_uniform/subset_strict_data.npz'><code>subset_strict_data.npz</code></a>：Panel B 的 0-1 s 波形子集数据。</li><li><a href='images/wang_figure3_uniform/distance_bin_wiggle_panel_data.npz'><code>distance_bin_wiggle_panel_data.npz</code></a>：Panel C 的去尖峰后距离分箱波形数据。</li><li><a href='images/wang_figure3_uniform/wang_figure3d_bandpassed_fill_scaled_2p00_no_fill_data.npz'><code>wang_figure3d_bandpassed_fill_scaled_2p00_no_fill_data.npz</code></a>：Panel D 的 bandpassed distance-bin 显示数据。</li></ul>
+</body></html>

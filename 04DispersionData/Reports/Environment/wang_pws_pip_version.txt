@@ -1,0 +1,1 @@
+pip 26.1.2 from /mnt/data_hdd/lgx/MSH_ANT/.venvs/2014_wang_pws/lib/python3.12/site-packages/pip (python 3.12)

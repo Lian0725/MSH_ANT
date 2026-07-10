@@ -1,0 +1,13 @@
+{
+  "cupy": "14.1.1",
+  "geopy": "2.4.1",
+  "h5py": "3.14.0",
+  "matplotlib": "3.11.0",
+  "numba": null,
+  "numpy": "2.5.0",
+  "obspy": null,
+  "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "scipy": "1.18.0",
+  "tensorflow": "2.21.0"
+}

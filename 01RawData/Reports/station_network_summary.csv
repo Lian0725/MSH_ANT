@@ -1,0 +1,6 @@
+year,network,description,wave_dir,meta_dir,station_count_waveform,station_count_metadata_xml,waveform_file_count,first_date,last_date,sampling_rates_hz,channels,components,read_error_count
+2014,1D,2014 年 1D 临时密集台阵原始连续波形,/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/WaveData/1D,/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/MetaData/1D,898,898,11799,2014-07-18,2014-08-05,250,DPZ,Z,0
+2014,XD,2014 年 XD 台网原始连续波形,/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/WaveData/XD,/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/MetaData/XD,70,70,1286,2014-07-18,2014-08-05,100,HHZ,Z,0
+2014,permanent,2014 年永久台站原始连续波形,/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/WaveData/permanent,/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/MetaData/permanent,13,13,245,2014-07-18,2014-08-05,100;50,BHZ;EHZ,Z,0
+2017,YI,2017 年 YI 临时台阵原始连续波形,/mnt/data_hdd/MSH_ANT_Final/01RawData/2017/WaveData/YI,/mnt/data_hdd/MSH_ANT_Final/01RawData/2017/MetaData/YI,136,136,4582,2017-08-19,2017-09-27,250,DPZ,Z,0
+2017,permanent,2017 年永久台站原始连续波形,/mnt/data_hdd/MSH_ANT_Final/01RawData/2017/WaveData/permanent,/mnt/data_hdd/MSH_ANT_Final/01RawData/2017/MetaData/permanent,85,85,2311,2017-08-19,2017-09-27,100;200;40;50,BHZ;EHZ;ENZ;HHZ;HNZ,Z,0

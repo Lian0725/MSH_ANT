@@ -1,0 +1,31 @@
+OS                           : Linux-6.8.0-124-generic-x86_64-with-glibc2.39
+Python Version               : 3.12.3
+CuPy Version                 : 14.1.1
+CuPy Platform                : NVIDIA CUDA
+NumPy Version                : 2.5.0
+SciPy Version                : 1.18.0
+Cython Build Version         : 3.2.4
+Cython Runtime Version       : None
+CUDA Root                    : None
+NVCC PATH                    : None
+CUDA Build Version           : 12090
+CUDA Driver Version          : 13020
+CUDA Runtime Version         : 12090 (linked to CuPy) / 12090 (locally installed)
+CUDA Extra Include Dirs      : ['/mnt/data_hdd/lgx/MSH_ANT/envs/disp_gpu/lib/python3.12/site-packages/nvidia/cuda_runtime/include']
+cuBLAS Version               : (available)
+cuFFT Version                : 11401
+cuRAND Version               : 10310
+cuSOLVER Version             : (11, 7, 5)
+cuSPARSE Version             : (available)
+NVRTC Version                : (12, 9)
+Thrust Version               : 300102
+CUB Build Version            : 300102
+Jitify Build Version         : <unknown>
+NCCL Build Version           : 22501
+NCCL Runtime Version         : 23007
+cuTENSOR Version             : None
+cuSPARSELt Build Version     : None
+Device 0 Name                : NVIDIA GeForce RTX 5090 D
+Device 0 Compute Capability  : 120
+Device 0 PCI Bus ID          : 0000:02:00.0
+

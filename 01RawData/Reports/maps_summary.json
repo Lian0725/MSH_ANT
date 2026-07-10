@@ -1,0 +1,51 @@
+[
+  {
+    "name": "maps_2014",
+    "output_png": "/mnt/data_hdd/MSH_ANT_Final/01RawData/Reports/maps_2014.png",
+    "output_pdf": "/mnt/data_hdd/MSH_ANT_Final/01RawData/Reports/maps_2014.pdf",
+    "source_metadata": [
+      {
+        "label": "1D",
+        "count": 898,
+        "source_dir": "/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/MetaData/1D"
+      },
+      {
+        "label": "XD",
+        "count": 70,
+        "source_dir": "/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/MetaData/XD"
+      },
+      {
+        "label": "Permanent",
+        "count": 13,
+        "source_dir": "/mnt/data_hdd/MSH_ANT_Final/01RawData/2014/MetaData/permanent"
+      }
+    ],
+    "projection": "M16c",
+    "relief_grid": "@earth_relief_15s",
+    "inset_relief_grid": "@earth_relief_01s",
+    "crater_lon": -122.1944,
+    "crater_lat": 46.1912
+  },
+  {
+    "name": "maps_2017",
+    "output_png": "/mnt/data_hdd/MSH_ANT_Final/01RawData/Reports/maps_2017.png",
+    "output_pdf": "/mnt/data_hdd/MSH_ANT_Final/01RawData/Reports/maps_2017.pdf",
+    "source_metadata": [
+      {
+        "label": "YI",
+        "count": 136,
+        "source_dir": "/mnt/data_hdd/MSH_ANT_Final/01RawData/2017/MetaData/YI"
+      },
+      {
+        "label": "Permanent",
+        "count": 85,
+        "source_dir": "/mnt/data_hdd/MSH_ANT_Final/01RawData/2017/MetaData/permanent"
+      }
+    ],
+    "projection": "M16c",
+    "relief_grid": "@earth_relief_15s",
+    "inset_relief_grid": "@earth_relief_01s",
+    "crater_lon": -122.1944,
+    "crater_lat": 46.1912
+  }
+]
