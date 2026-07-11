@@ -436,6 +436,50 @@ class RunnerTests(unittest.TestCase):
                 )
             )
 
+    def test_resume_rejects_npz_with_invalid_array_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dat = root / "dat/1D.4001__1D.4002.dat"
+            write_dat(dat)
+            curves = root / "curves"
+            write_curve(curves / "GDisp.1D.4001__1D.4002.txt")
+            write_curve(curves / "CDisp.1D.4001__1D.4002.txt")
+            pixels = root / "pixels"
+            npz_path = pixels / "1D.4001__1D.4002.npz"
+            write_npz(npz_path)
+            with np.load(npz_path, allow_pickle=False) as payload:
+                malformed = {key: payload[key] for key in payload.files}
+            malformed["group_image"] = np.ones((1, 1))
+            np.savez_compressed(npz_path, **malformed)
+
+            self.assertFalse(
+                self.runner.pair_outputs_exist(
+                    str(dat), str(curves), energy_dir=str(pixels)
+                )
+            )
+
+    def test_resume_rejects_unreadable_required_npz_array(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dat = root / "dat/1D.4001__1D.4002.dat"
+            write_dat(dat)
+            curves = root / "curves"
+            write_curve(curves / "GDisp.1D.4001__1D.4002.txt")
+            write_curve(curves / "CDisp.1D.4001__1D.4002.txt")
+            pixels = root / "pixels"
+            npz_path = pixels / "1D.4001__1D.4002.npz"
+            write_npz(npz_path)
+            with np.load(npz_path, allow_pickle=False) as payload:
+                malformed = {key: payload[key] for key in payload.files}
+            malformed["group_image"] = np.array([object()], dtype=object)
+            np.savez_compressed(npz_path, **malformed)
+
+            self.assertFalse(
+                self.runner.pair_outputs_exist(
+                    str(dat), str(curves), energy_dir=str(pixels)
+                )
+            )
+
     def test_processing_exception_returns_error_and_removes_partial_outputs(self):
         self.assertTrue(hasattr(self.runner, "PairStatus"), "runner must expose PairStatus")
         with tempfile.TemporaryDirectory() as tmp:

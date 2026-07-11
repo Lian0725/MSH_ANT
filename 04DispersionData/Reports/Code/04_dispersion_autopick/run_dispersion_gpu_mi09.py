@@ -230,6 +230,23 @@ def pair_outputs_exist(dat_path, out_dir, energy_dir=None):
                 }
                 if not required_keys.issubset(payload.files):
                     return False
+                expected_shapes = {
+                    "group_image": (model_velocity_count(), period_count()),
+                    "phase_image": (model_velocity_count(), period_count()),
+                    "periods": (period_count(),),
+                    "velocities": (model_velocity_count(),),
+                    "velocity_axis_km_s": (model_velocity_count(),),
+                    "snr": (period_count(),),
+                    "distance_km": (),
+                }
+                for key, expected_shape in expected_shapes.items():
+                    if np.asarray(payload[key]).shape != expected_shape:
+                        return False
+                actual_velocity_axis = np.asarray(
+                    payload["actual_velocity_axis_km_s"]
+                )
+                if actual_velocity_axis.ndim != 1 or actual_velocity_axis.size == 0:
+                    return False
                 if "failure_reason" in payload.files:
                     reason = str(np.asarray(payload["failure_reason"]).item()).strip()
                     if reason:
