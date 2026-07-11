@@ -9,6 +9,18 @@ from pathlib import Path
 import numpy as np
 
 
+REQUIRED_NPZ_KEYS = {
+    "group_image",
+    "phase_image",
+    "periods",
+    "velocities",
+    "velocity_axis_km_s",
+    "actual_velocity_axis_km_s",
+    "snr",
+    "distance_km",
+}
+
+
 def pair_from_curve_name(path: Path, prefix: str) -> str:
     name = path.name
     if not name.startswith(prefix) or not name.endswith(".txt"):
@@ -16,9 +28,16 @@ def pair_from_curve_name(path: Path, prefix: str) -> str:
     return name[len(prefix) : -4]
 
 
-def collect_pairs(dat_dir: Path, curves_dir: Path, pixels_dir: Path, logs_dir: Path, log_glob: str):
+def collect_pairs(
+    dat_dir: Path,
+    dat_glob: str,
+    curves_dir: Path,
+    pixels_dir: Path,
+    logs_dir: Path,
+    log_glob: str,
+):
     return {
-        "dat": {path.stem for path in dat_dir.glob("*.dat")},
+        "dat": {path.stem for path in dat_dir.glob(dat_glob)},
         "g": {
             pair_from_curve_name(path, "GDisp.")
             for path in curves_dir.glob("GDisp.*.txt")
@@ -32,15 +51,16 @@ def collect_pairs(dat_dir: Path, curves_dir: Path, pixels_dir: Path, logs_dir: P
     }
 
 
-def count_log_pattern(logs, pattern: str) -> int:
-    count = 0
+def count_log_patterns(logs, patterns):
+    counts = {pattern: 0 for pattern in patterns}
     for path in logs:
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        count += text.count(pattern)
-    return count
+        for pattern in patterns:
+            counts[pattern] += text.count(pattern)
+    return counts
 
 
 def validate_curve_file(path: Path, expected_lines: int) -> str:
@@ -61,11 +81,17 @@ def validate_curve_file(path: Path, expected_lines: int) -> str:
     return ""
 
 
-def failure_reason_from_npz(path: Path) -> str:
-    """Return a failure marker or an unreadable-file diagnostic."""
+def npz_container_error(path: Path) -> str:
+    """Return a structural/failure-marker error without loading image arrays."""
     try:
         with zipfile.ZipFile(str(path), "r") as archive:
-            has_failure_reason = "failure_reason.npy" in archive.namelist()
+            members = set(archive.namelist())
+        missing = sorted(
+            key for key in REQUIRED_NPZ_KEYS if "{}.npy".format(key) not in members
+        )
+        if missing:
+            return "missing keys {}".format(",".join(missing))
+        has_failure_reason = "failure_reason.npy" in members
         if not has_failure_reason:
             return ""
         with np.load(str(path), allow_pickle=False) as data:
@@ -76,24 +102,11 @@ def failure_reason_from_npz(path: Path) -> str:
 
 
 def validate_npz_file(path: Path) -> str:
-    marker = failure_reason_from_npz(path)
+    marker = npz_container_error(path)
     if marker:
         return "failure_reason={}".format(marker)
     try:
         with np.load(str(path), allow_pickle=False) as data:
-            required = {
-                "group_image",
-                "phase_image",
-                "periods",
-                "velocities",
-                "velocity_axis_km_s",
-                "actual_velocity_axis_km_s",
-                "snr",
-                "distance_km",
-            }
-            missing = sorted(required.difference(data.files))
-            if missing:
-                return "missing keys {}".format(",".join(missing))
             if data["group_image"].shape != (701, 49):
                 return "group_image shape {}".format(data["group_image"].shape)
             if data["phase_image"].shape != (701, 49):
@@ -125,21 +138,36 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Verify Wang DisperPicker batch outputs.")
     parser.add_argument("--output-dir", type=Path, help="Legacy run root.")
     parser.add_argument("--dat-dir", type=Path)
+    parser.add_argument("--dat-glob", default="*.dat")
     parser.add_argument("--curves-dir", type=Path)
     parser.add_argument("--pixels-dir", type=Path)
     parser.add_argument("--logs-dir", type=Path)
-    parser.add_argument("--log-glob", default="shard_*.log")
-    parser.add_argument("--expected-shards", type=int, default=16)
+    parser.add_argument("--log-glob")
+    parser.add_argument("--expected-shards", type=int)
     parser.add_argument("--sample-size", type=int, default=500)
     parser.add_argument("--expected-curve-lines", type=int, default=51)
     parser.add_argument("--report-json", type=Path)
     parser.add_argument("--require-done-lines", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    if args.expected_shards < 1:
+    legacy_layout = args.output_dir is not None
+    expected_shards = args.expected_shards
+    if expected_shards is None:
+        expected_shards = 24 if legacy_layout else 16
+    log_glob = args.log_glob
+    if log_glob is None:
+        log_glob = "dispersion24_shard_*_of_24.log" if legacy_layout else "shard_*.log"
+    if expected_shards < 1:
         parser.error("--expected-shards must be >= 1")
     dat_dir, curves_dir, pixels_dir, logs_dir = resolve_layout(args, parser)
-    pairs = collect_pairs(dat_dir, curves_dir, pixels_dir, logs_dir, args.log_glob)
+    pairs = collect_pairs(
+        dat_dir,
+        args.dat_glob,
+        curves_dir,
+        pixels_dir,
+        logs_dir,
+        log_glob,
+    )
 
     dat_pairs = pairs["dat"]
     missing_g = sorted(dat_pairs.difference(pairs["g"]))
@@ -162,36 +190,55 @@ def main(argv=None) -> int:
             except OSError:
                 zero_byte.append(str(path))
 
-    failure_marked_npz = []
+    invalid_npz = []
+    invalid_npz_count = 0
     for path in pixels_dir.glob("*.npz"):
-        marker = failure_reason_from_npz(path)
-        if marker:
-            failure_marked_npz.append({"file": path.name, "error": marker})
+        error = npz_container_error(path)
+        if error:
+            invalid_npz_count += 1
+            if len(invalid_npz) < 100:
+                invalid_npz.append({"file": path.name, "error": error})
+
+    curve_failures = []
+    curve_failure_count = 0
+    curve_groups = (
+        ("GDisp.", curves_dir.glob("GDisp.*.txt")),
+        ("CDisp.", curves_dir.glob("CDisp.*.txt")),
+    )
+    for prefix, paths in curve_groups:
+        for path in paths:
+            error = validate_curve_file(path, args.expected_curve_lines)
+            if error:
+                curve_failure_count += 1
+                if len(curve_failures) < 50:
+                    curve_failures.append(
+                        {
+                            "pair": pair_from_curve_name(path, prefix),
+                            "file": path.name,
+                            "error": error,
+                        }
+                    )
 
     sample_pairs = sorted(dat_pairs)
     rng = random.Random(20260630)
     if len(sample_pairs) > args.sample_size:
         sample_pairs = sorted(rng.sample(sample_pairs, args.sample_size))
 
-    curve_failures = []
     npz_failures = []
     for pair in sample_pairs:
-        for prefix in ("GDisp.", "CDisp."):
-            path = curves_dir / "{}{}.txt".format(prefix, pair)
-            error = validate_curve_file(path, args.expected_curve_lines)
-            if error:
-                curve_failures.append({"pair": pair, "file": path.name, "error": error})
         error = validate_npz_file(pixels_dir / "{}.npz".format(pair))
         if error:
             npz_failures.append({"pair": pair, "error": error})
 
-    log_error_count = count_log_pattern(pairs["logs"], "处理失败")
-    traceback_count = count_log_pattern(pairs["logs"], "Traceback")
-    done_count = count_log_pattern(pairs["logs"], "处理完成")
+    log_counts = count_log_patterns(pairs["logs"], ("处理失败", "Traceback", "处理完成"))
+    log_error_count = log_counts["处理失败"]
+    traceback_count = log_counts["Traceback"]
+    done_count = log_counts["处理完成"]
 
     report = {
         "directories": {
             "dat": str(dat_dir),
+            "dat_glob": args.dat_glob,
             "curves": str(curves_dir),
             "pixels": str(pixels_dir),
             "logs": str(logs_dir),
@@ -202,12 +249,12 @@ def main(argv=None) -> int:
             "c": len(pairs["c"]),
             "npz": len(pairs["npz"]),
             "logs": len(pairs["logs"]),
-            "expected_shards": args.expected_shards,
+            "expected_shards": expected_shards,
             "done_lines": done_count,
             "log_processing_failures": log_error_count,
             "tracebacks": traceback_count,
             "zero_byte_files": len(zero_byte),
-            "failure_marked_npz": len(failure_marked_npz),
+            "invalid_npz": invalid_npz_count,
         },
         "missing": {
             "g": missing_g[:100],
@@ -222,12 +269,12 @@ def main(argv=None) -> int:
             "c_count": len(extra_c),
             "npz_count": len(extra_npz),
         },
-        "failure_marked_npz": failure_marked_npz[:100],
+        "invalid_npz": invalid_npz,
         "sample": {
             "checked_pairs": len(sample_pairs),
             "curve_failures": curve_failures[:50],
             "npz_failures": npz_failures[:50],
-            "curve_failure_count": len(curve_failures),
+            "curve_failure_count": curve_failure_count,
             "npz_failure_count": len(npz_failures),
         },
     }
@@ -240,12 +287,12 @@ def main(argv=None) -> int:
         and not extra_c
         and not extra_npz
         and not zero_byte
-        and not failure_marked_npz
+        and invalid_npz_count == 0
         and log_error_count == 0
         and traceback_count == 0
-        and len(pairs["logs"]) == args.expected_shards
-        and done_count == args.expected_shards
-        and not curve_failures
+        and len(pairs["logs"]) == expected_shards
+        and done_count == expected_shards
+        and curve_failure_count == 0
         and not npz_failures
     )
     report["ok"] = bool(ok)

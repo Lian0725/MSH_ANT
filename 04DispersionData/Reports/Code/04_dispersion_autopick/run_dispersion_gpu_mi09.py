@@ -182,6 +182,26 @@ def pair_output_paths(dat_path, out_dir, energy_dir=None):
     return required
 
 
+def curve_output_is_valid(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.readline().split()
+            receiver = handle.readline().split()
+            if len(source) < 2 or len(receiver) < 2:
+                return False
+            [float(value) for value in source[:2] + receiver[:2]]
+            row_count = 0
+            for line in handle:
+                parts = line.split()
+                if len(parts) != 4:
+                    return False
+                [float(value) for value in parts]
+                row_count += 1
+        return row_count == period_count()
+    except (OSError, ValueError):
+        return False
+
+
 def pair_outputs_exist(dat_path, out_dir, energy_dir=None):
     required = pair_output_paths(dat_path, out_dir, energy_dir=energy_dir)
     for path in required:
@@ -191,10 +211,25 @@ def pair_outputs_exist(dat_path, out_dir, energy_dir=None):
         except OSError:
             return False
 
+    if not all(curve_output_is_valid(path) for path in required[:2]):
+        return False
+
     if energy_dir:
         npz_path = required[-1]
         try:
             with np.load(npz_path, allow_pickle=False) as payload:
+                required_keys = {
+                    "group_image",
+                    "phase_image",
+                    "periods",
+                    "velocities",
+                    "velocity_axis_km_s",
+                    "actual_velocity_axis_km_s",
+                    "snr",
+                    "distance_km",
+                }
+                if not required_keys.issubset(payload.files):
+                    return False
                 if "failure_reason" in payload.files:
                     reason = str(np.asarray(payload["failure_reason"]).item()).strip()
                     if reason:

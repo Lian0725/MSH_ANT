@@ -103,7 +103,7 @@ run_extract() {
   local curves_dir="$2"
   local npz_dir="$3"
   local label="$4"
-  local log_dir="${LOG_ROOT}/${label}_logs"
+  local log_dir="${LOG_ROOT}/${label}_logs_${SHARDS}shards"
 
   mkdir -p "$curves_dir" "$npz_dir" "$log_dir"
   need_exec "$PY_GPU"
@@ -161,6 +161,7 @@ run_extract() {
 
   "$PY_VERIFY" "${SCRIPT_DIR}/verify_disperpicker_full_run.py" \
     --dat-dir "$dat_dir" \
+    --dat-glob "$DAT_GLOB" \
     --curves-dir "$curves_dir" \
     --pixels-dir "$npz_dir" \
     --logs-dir "$log_dir" \

@@ -223,8 +223,54 @@ exit 0
             args = verify_capture.read_text(encoding="utf-8").splitlines()
             self.assertIn("--dat-dir", args)
             self.assertIn(str(dat_dir), args)
+            self.assertIn("--dat-glob", args)
+            self.assertIn("1D.*.dat", args)
             self.assertIn("--expected-shards", args)
             self.assertIn("1", args)
+
+    def test_extract_verifies_only_fresh_logs_for_current_shard_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Final"
+            dat_dir = root / "04DispersionData/2014/1D_1D/NonRemoveSpikes/DatData/dat_all"
+            dat_dir.mkdir(parents=True)
+            stale_logs = root / "04DispersionData/Reports/RebuildLogs/nonremove_logs"
+            stale_logs.mkdir(parents=True)
+            (stale_logs / "shard_9.log").write_text("处理失败: stale\n", encoding="utf-8")
+            fake_gpu = Path(tmp) / "fake-gpu"
+            write_executable(fake_gpu, "#!/usr/bin/env bash\nexit 0\n")
+            fake_verify = Path(tmp) / "fake-verify"
+            write_executable(
+                fake_verify,
+                """#!/usr/bin/env bash
+logs=
+expected=
+prev=
+for arg in "$@"; do
+  if [[ "$prev" == "--logs-dir" ]]; then logs="$arg"; fi
+  if [[ "$prev" == "--expected-shards" ]]; then expected="$arg"; fi
+  prev="$arg"
+done
+count=$(find "$logs" -maxdepth 1 -type f -name 'shard_*.log' | wc -l | tr -d ' ')
+[[ "$count" == "$expected" ]]
+""",
+            )
+            env = os.environ.copy()
+            env.update(
+                FINAL_ROOT=str(root),
+                PY_GPU=str(fake_gpu),
+                PY_VERIFY=str(fake_verify),
+                SHARDS="1",
+            )
+
+            result = subprocess.run(
+                ["bash", str(REBUILD), "extract-unspiked"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
 
 class ConverterTests(unittest.TestCase):
@@ -352,6 +398,44 @@ class RunnerTests(unittest.TestCase):
 
             self.assertFalse(complete)
 
+    def test_resume_rejects_truncated_curve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dat = root / "dat/1D.4001__1D.4002.dat"
+            write_dat(dat)
+            curves = root / "curves"
+            curves.mkdir()
+            (curves / "GDisp.1D.4001__1D.4002.txt").write_text(
+                "truncated but nonempty\n", encoding="utf-8"
+            )
+            write_curve(curves / "CDisp.1D.4001__1D.4002.txt")
+            pixels = root / "pixels"
+            write_npz(pixels / "1D.4001__1D.4002.npz")
+
+            self.assertFalse(
+                self.runner.pair_outputs_exist(
+                    str(dat), str(curves), energy_dir=str(pixels)
+                )
+            )
+
+    def test_resume_rejects_npz_missing_required_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dat = root / "dat/1D.4001__1D.4002.dat"
+            write_dat(dat)
+            curves = root / "curves"
+            write_curve(curves / "GDisp.1D.4001__1D.4002.txt")
+            write_curve(curves / "CDisp.1D.4001__1D.4002.txt")
+            pixels = root / "pixels"
+            pixels.mkdir()
+            np.savez_compressed(pixels / "1D.4001__1D.4002.npz", unexpected=np.ones(1))
+
+            self.assertFalse(
+                self.runner.pair_outputs_exist(
+                    str(dat), str(curves), energy_dir=str(pixels)
+                )
+            )
+
     def test_processing_exception_returns_error_and_removes_partial_outputs(self):
         self.assertTrue(hasattr(self.runner, "PairStatus"), "runner must expose PairStatus")
         with tempfile.TemporaryDirectory() as tmp:
@@ -464,12 +548,44 @@ class VerifierTests(unittest.TestCase):
             self.make_layout(root, failure_reason="legacy interpolation failure")
             self.assertNotEqual(self.run_verifier(root), 0)
 
+    def test_dat_glob_limits_verification_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_layout(root)
+            write_dat(root / "dat/XD.MS01__1D.4001.dat")
+            args = self.verifier_args(root) + ["--dat-glob", "1D.*.dat"]
+            try:
+                rc = self.verifier.main(args)
+            except SystemExit as exc:
+                self.fail(f"verifier rejected --dat-glob: {exc}")
+            self.assertEqual(rc, 0)
+
     def test_empty_dat_directory_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in ("dat", "curves", "pixels", "logs"):
                 (root / name).mkdir()
             self.assertNotEqual(self.run_verifier(root), 0)
+
+    def test_legacy_output_dir_uses_legacy_log_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_dat(root / "dat_ge10/1D.4001__1D.4002.dat")
+            write_curve(root / "curves_ge10/GDisp.1D.4001__1D.4002.txt")
+            write_curve(root / "curves_ge10/CDisp.1D.4001__1D.4002.txt")
+            write_npz(root / "full_pixel_data_ge10/1D.4001__1D.4002.npz")
+            logs = root / "logs"
+            logs.mkdir()
+            for index in range(24):
+                (logs / f"dispersion24_shard_{index}_of_24.log").write_text(
+                    "处理完成: 成功=0, 失败=0, 共=0\n", encoding="utf-8"
+                )
+
+            rc = self.verifier.main(
+                ["--output-dir", str(root), "--sample-size", "1"]
+            )
+
+            self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":
