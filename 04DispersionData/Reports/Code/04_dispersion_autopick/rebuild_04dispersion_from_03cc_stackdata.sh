@@ -13,6 +13,7 @@ LOG_ROOT="${REPORT_ROOT}/RebuildLogs"
 
 PY_FTAN="${PY_FTAN:-/mnt/data_hdd/lgx/MSH_ANT/envs/ftan/bin/python}"
 PY_GPU="${PY_GPU:-/mnt/data_hdd/lgx/MSH_ANT/envs/disp_gpu/bin/python}"
+PY_VERIFY="${PY_VERIFY:-$PY_GPU}"
 BACKEND="${BACKEND:-cupy}"
 SHARDS="${SHARDS:-16}"
 FINAL_CT="${FINAL_CT:-0.01}"
@@ -36,6 +37,7 @@ Environment variables:
   FINAL_ROOT          Default: /mnt/data_hdd/MSH_ANT_Final
   PY_FTAN             DAT conversion interpreter
   PY_GPU              GPU dispersion interpreter
+  PY_VERIFY           Verification interpreter; default PY_GPU
   BACKEND             cupy or numpy; default cupy
   SHARDS              Number of parallel dispersion shards; default 16
   FINAL_CT            Final DisperPicker ct; default 0.01
@@ -105,8 +107,10 @@ run_extract() {
 
   mkdir -p "$curves_dir" "$npz_dir" "$log_dir"
   need_exec "$PY_GPU"
+  need_exec "$PY_VERIFY"
   need_file "$dat_dir"
   need_file "${SCRIPT_DIR}/run_dispersion_gpu_mi09.py"
+  need_file "${SCRIPT_DIR}/verify_disperpicker_full_run.py"
   need_file "${SCRIPT_DIR}/EGFAnalysisPy/DisperPicker/saver/checkpoint"
 
   local resume_flag=()
@@ -154,6 +158,15 @@ run_extract() {
     echo "[extract] failed_shards=$failed_shards" >&2
     return 1
   fi
+
+  "$PY_VERIFY" "${SCRIPT_DIR}/verify_disperpicker_full_run.py" \
+    --dat-dir "$dat_dir" \
+    --curves-dir "$curves_dir" \
+    --pixels-dir "$npz_dir" \
+    --logs-dir "$log_dir" \
+    --expected-shards "$SHARDS" \
+    --report-json "${LOG_ROOT}/${label}_verify.json" \
+    2>&1 | tee "${LOG_ROOT}/${label}_verify.log"
 
   echo "[extract] done $(date '+%F %T %Z')"
 }

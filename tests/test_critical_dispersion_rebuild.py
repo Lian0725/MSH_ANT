@@ -188,6 +188,44 @@ exit 0
             self.assertIn("--dat_glob", args)
             self.assertIn("1D.*.dat", args)
 
+    def test_successful_extract_runs_verifier_with_current_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Final"
+            dat_dir = root / "04DispersionData/2014/1D_1D/NonRemoveSpikes/DatData/dat_all"
+            dat_dir.mkdir(parents=True)
+            fake_gpu = Path(tmp) / "fake-gpu"
+            write_executable(fake_gpu, "#!/usr/bin/env bash\nexit 0\n")
+            verify_capture = Path(tmp) / "verify-args.txt"
+            fake_verify = Path(tmp) / "fake-verify"
+            write_executable(
+                fake_verify,
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$VERIFY_ARGS\"\n",
+            )
+            env = os.environ.copy()
+            env.update(
+                FINAL_ROOT=str(root),
+                PY_GPU=str(fake_gpu),
+                PY_VERIFY=str(fake_verify),
+                SHARDS="1",
+                VERIFY_ARGS=str(verify_capture),
+            )
+
+            result = subprocess.run(
+                ["bash", str(REBUILD), "extract-unspiked"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue(verify_capture.exists(), result.stderr + result.stdout)
+            args = verify_capture.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--dat-dir", args)
+            self.assertIn(str(dat_dir), args)
+            self.assertIn("--expected-shards", args)
+            self.assertIn("1", args)
+
 
 class ConverterTests(unittest.TestCase):
     @classmethod
