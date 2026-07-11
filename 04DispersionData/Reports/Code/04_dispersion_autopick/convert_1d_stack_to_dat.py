@@ -359,10 +359,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         station_coords = load_stationxml_coordinates(args.stationxml_dir)
         logger.info("loaded %d station coordinate aliases from StationXML", len(station_coords))
+        if not station_coords:
+            logger.error("StationXML directory contains no usable station coordinates")
+            return 1
     elif args.min_distance_km > 0.0 or args.max_distance_km is not None:
         station_coords = load_station_coordinates(args.stack_root, component=args.component)
         logger.info("loaded %d station coordinates for distance prefilter", len(station_coords))
 
+    candidate_count = 0
+    selected_count = 0
     for pair_index, (source, receiver, h5_path) in enumerate(iter_stack_pairs(
         args.stack_root,
         source_glob=args.source_glob,
@@ -373,9 +378,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         min_distance_km=args.min_distance_km,
         max_distance_km=args.max_distance_km,
     )):
+        candidate_count += 1
         if pair_index % args.num_shards != args.shard_index:
             shard_skipped += 1
             continue
+        selected_count += 1
+        if args.stationxml_dir is not None:
+            missing_coords = [
+                station for station in (source, receiver) if station not in station_coords
+            ]
+            if missing_coords:
+                logger.error(
+                    "skip %s__%s: missing StationXML coordinates for %s",
+                    source,
+                    receiver,
+                    ", ".join(missing_coords),
+                )
+                failed += 1
+                continue
         pair_name = f"{source}__{receiver}"
         out_dat_path = args.out_dir / f"{pair_name}.dat"
         result = convert_one_stack(
@@ -400,14 +420,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             break
 
     logger.info(
-        "done: success=%d skipped=%d shard_skipped=%d failed=%d output=%s",
+        "done: candidates=%d selected=%d success=%d skipped=%d shard_skipped=%d failed=%d output=%s",
+        candidate_count,
+        selected_count,
         success,
         skipped,
         shard_skipped,
         failed,
         args.out_dir,
     )
-    return 0
+    if candidate_count == 0:
+        logger.error("no stack pairs matched the requested source/receiver selection")
+        return 1
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

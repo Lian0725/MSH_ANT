@@ -4,10 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FINAL_ROOT="${FINAL_ROOT:-/mnt/data_hdd/MSH_ANT_Final}"
 REPORT_ROOT="${FINAL_ROOT}/04DispersionData/Reports"
-STACK_ROOT="${FINAL_ROOT}/03CC_StackData/2014/1D/STACK"
-STACK_SPIKE_ROOT="${FINAL_ROOT}/03CC_StackData/2014/1D/STACK_SPIKE_REMOVED_DIAGFIT_20260628"
-NONREMOVE_ROOT="${FINAL_ROOT}/04DispersionData/2014/1D/NonRemoveSpikes"
-REMOVE_ROOT="${FINAL_ROOT}/04DispersionData/2014/1D/RemoveSpikes"
+STACK_ROOT="${FINAL_ROOT}/03CC_StackData/2014/1D_1D/STACK"
+STACK_SPIKE_ROOT="${FINAL_ROOT}/03CC_StackData/2014/1D_1D/STACK_SPIKE_REMOVED_DIAGFIT_20260628"
+NONREMOVE_ROOT="${FINAL_ROOT}/04DispersionData/2014/1D_1D/NonRemoveSpikes"
+REMOVE_ROOT="${FINAL_ROOT}/04DispersionData/2014/1D_1D/RemoveSpikes"
+STATIONXML_DIR="${STATIONXML_DIR:-${FINAL_ROOT}/01RawData/2014/MetaData/1D}"
 LOG_ROOT="${REPORT_ROOT}/RebuildLogs"
 
 PY_FTAN="${PY_FTAN:-/mnt/data_hdd/lgx/MSH_ANT/envs/ftan/bin/python}"
@@ -16,6 +17,7 @@ BACKEND="${BACKEND:-cupy}"
 SHARDS="${SHARDS:-16}"
 FINAL_CT="${FINAL_CT:-0.01}"
 RESUME_EXISTING="${RESUME_EXISTING:-1}"
+DAT_GLOB="${DAT_GLOB:-1D.*.dat}"
 
 usage() {
   cat <<'EOF'
@@ -38,6 +40,8 @@ Environment variables:
   SHARDS              Number of parallel dispersion shards; default 16
   FINAL_CT            Final DisperPicker ct; default 0.01
   RESUME_EXISTING     1 to pass --resume_existing, 0 to omit
+  STATIONXML_DIR      2014 1D StationXML directory
+  DAT_GLOB            DAT filename glob; default 1D.*.dat
 
 Notes:
   1. This script does not delete existing outputs.
@@ -73,6 +77,7 @@ run_convert() {
   mkdir -p "$dat_dir" "$LOG_ROOT"
   need_exec "$PY_FTAN"
   need_file "$stack_root"
+  need_file "$STATIONXML_DIR"
   need_file "${SCRIPT_DIR}/convert_1d_stack_to_dat.py"
 
   {
@@ -85,6 +90,7 @@ run_convert() {
       --component ZZ \
       --source-glob '1D.*' \
       --receiver-glob '1D.*' \
+      --stationxml-dir "$STATIONXML_DIR" \
       --allow-zero-ngood
     echo "[convert] done $(date '+%F %T %Z')"
   } 2>&1 | tee "$log_file"
@@ -114,11 +120,14 @@ run_extract() {
   echo "[extract] npz_dir=$npz_dir"
   echo "[extract] shards=$SHARDS backend=$BACKEND final_ct=$FINAL_CT resume=$RESUME_EXISTING"
 
+  local pids=()
+  local shard_ids=()
   for ((i=0; i<SHARDS; i++)); do
     CUDA_VISIBLE_DEVICES=0 \
     "$PY_GPU" "${SCRIPT_DIR}/run_dispersion_gpu_mi09.py" \
       --dat_dir "$dat_dir" \
       --out_dir "$curves_dir" \
+      --dat_glob "$DAT_GLOB" \
       --skip_qc_plot \
       --energy_dir "$npz_dir" \
       --backend "$BACKEND" \
@@ -127,8 +136,24 @@ run_extract() {
       --shard_index "$i" \
       "${resume_flag[@]}" \
       > "${log_dir}/shard_${i}.log" 2>&1 &
+    pids+=("$!")
+    shard_ids+=("$i")
   done
-  wait
+
+  local failed_shards=0
+  for ((i=0; i<${#pids[@]}; i++)); do
+    if wait "${pids[$i]}"; then
+      continue
+    else
+      local status=$?
+      echo "[extract] shard ${shard_ids[$i]} failed with status ${status}" >&2
+      failed_shards=$((failed_shards + 1))
+    fi
+  done
+  if ((failed_shards > 0)); then
+    echo "[extract] failed_shards=$failed_shards" >&2
+    return 1
+  fi
 
   echo "[extract] done $(date '+%F %T %Z')"
 }
