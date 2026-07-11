@@ -14,6 +14,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import numpy as np
@@ -70,6 +71,12 @@ class PhaseRefIndex:
     index: int
     period_s: float
     source: str
+
+
+class PairStatus(Enum):
+    SUCCESS = "success"
+    NO_PICK = "no_pick"
+    ERROR = "error"
 
 
 def backend_config():
@@ -164,7 +171,7 @@ def pair_name_from_dat_path(dat_path):
     return os.path.splitext(os.path.basename(dat_path))[0]
 
 
-def pair_outputs_exist(dat_path, out_dir, energy_dir=None):
+def pair_output_paths(dat_path, out_dir, energy_dir=None):
     pair_name = pair_name_from_dat_path(dat_path)
     required = [
         os.path.join(out_dir, f"GDisp.{pair_name}.txt"),
@@ -172,7 +179,39 @@ def pair_outputs_exist(dat_path, out_dir, energy_dir=None):
     ]
     if energy_dir:
         required.append(os.path.join(energy_dir, pair_name + ".npz"))
-    return all(os.path.exists(path) for path in required)
+    return required
+
+
+def pair_outputs_exist(dat_path, out_dir, energy_dir=None):
+    required = pair_output_paths(dat_path, out_dir, energy_dir=energy_dir)
+    for path in required:
+        try:
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                return False
+        except OSError:
+            return False
+
+    if energy_dir:
+        npz_path = required[-1]
+        try:
+            with np.load(npz_path, allow_pickle=False) as payload:
+                if "failure_reason" in payload.files:
+                    reason = str(np.asarray(payload["failure_reason"]).item()).strip()
+                    if reason:
+                        return False
+        except Exception:
+            return False
+    return True
+
+
+def remove_pair_outputs(dat_path, out_dir, energy_dir=None):
+    for path in pair_output_paths(dat_path, out_dir, energy_dir=energy_dir):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning("unable to remove partial output %s: %s", path, exc)
 
 
 def filter_dat_files(
@@ -244,50 +283,6 @@ def station_info_from_dat(dat_path):
         lon_b, lat_b = map(float, handle.readline().split()[:2])
     dist = _haversine_km(lat_a, lon_a, lat_b, lon_b)
     return [dist, _display_lon(lon_a), lat_a, _display_lon(lon_b), lat_b]
-
-
-def write_empty_outputs(dat_path, out_dir, energy_dir, backend, failure_reason, sta_info=None):
-    pair_name = pair_name_from_dat_path(dat_path)
-    sta_info = sta_info or station_info_from_dat(dat_path)
-    periods = np.linspace(CONFIG["StartT"], CONFIG["EndT"], period_count())
-    snr = np.zeros_like(periods)
-
-    os.makedirs(out_dir, exist_ok=True)
-    for prefix in ("GDisp", "CDisp"):
-        with open(os.path.join(out_dir, f"{prefix}.{pair_name}.txt"), "w", encoding="utf-8") as f:
-            f.write(f"{sta_info[1]:.8f}    {sta_info[2]:.8f}\n")
-            f.write(f"{sta_info[3]:.8f}    {sta_info[4]:.8f}\n")
-            for t_val in periods:
-                f.write(f"{t_val:.2f}  0.000  0.000  0.000\n")
-
-    if energy_dir:
-        os.makedirs(energy_dir, exist_ok=True)
-        velocity_axis = np.linspace(MODEL_START_V, CONFIG["EndV"], model_velocity_count())
-        actual_axis = np.linspace(
-            CONFIG["StartV"],
-            CONFIG["EndV"],
-            round((CONFIG["EndV"] - CONFIG["StartV"]) / CONFIG["DeltaV"]) + 1,
-        )
-        image = np.zeros((model_velocity_count(), len(periods)), dtype=float)
-        np.savez_compressed(
-            os.path.join(energy_dir, pair_name + ".npz"),
-            group_image=image,
-            phase_image=image,
-            phase_image_raw=image,
-            periods=periods,
-            velocities=velocity_axis,
-            velocity_axis_km_s=velocity_axis,
-            actual_velocity_axis_km_s=actual_axis,
-            snr=snr,
-            actual_start_v=float(CONFIG["StartV"]),
-            configured_start_v=float(CONFIG["StartV"]),
-            end_v=float(CONFIG["EndV"]),
-            delta_v=float(CONFIG["DeltaV"]),
-            distance_km=float(sta_info[0]),
-            noise_time=float(CONFIG["NoiseTime"]),
-            backend=str(backend),
-            failure_reason=str(failure_reason),
-        )
 
 
 def _plot_dispersion_qc(
@@ -390,7 +385,7 @@ def process_one_pair(
     energy_dir=None,
     backend="cupy",
     final_ct=2.0,
-) -> bool:
+) -> PairStatus:
     pair_name = pair_name_from_dat_path(dat_path)
     start_time = time.time()
     config = backend_config()
@@ -589,24 +584,14 @@ def process_one_pair(
             )
         else:
             logger.warning("%s: 未提取到有效频散点，total=%.2fs", pair_name, elapsed)
-        return bool(has_result)
+        return PairStatus.SUCCESS if has_result else PairStatus.NO_PICK
 
     except Exception as exc:
         logger.error("%s 处理失败: %s", pair_name, exc)
         logger.debug(traceback.format_exc())
-        try:
-            write_empty_outputs(
-                dat_path,
-                out_dir,
-                energy_dir,
-                backend=backend,
-                failure_reason=f"image/interpolation failure: {type(exc).__name__}: {exc}",
-                sta_info=locals().get("sta_info"),
-            )
-            logger.warning("%s: 已写出空曲线和失败 NPZ，避免 resume 重复处理", pair_name)
-        except Exception as empty_exc:
-            logger.error("%s: 写出空结果失败: %s", pair_name, empty_exc)
-        return False
+        remove_pair_outputs(dat_path, out_dir, energy_dir=energy_dir)
+        logger.warning("%s: 已清理异常产生的部分输出", pair_name)
+        return PairStatus.ERROR
 
 
 def format_seconds(seconds):
@@ -689,6 +674,9 @@ def main(argv=None):
         dat_files = sorted(glob.glob(os.path.join(args.dat_dir, args.dat_glob)))
 
     total_dat_files = len(dat_files)
+    if total_dat_files == 0:
+        logger.error("DAT glob matched no files: %s", os.path.join(args.dat_dir, args.dat_glob))
+        return 1
     if not args.test_pair:
         dat_files, skipped_existing = filter_dat_files(
             dat_files,
@@ -717,7 +705,8 @@ def main(argv=None):
     logger.info("CNN 模型加载完成，开始批量处理")
 
     success = 0
-    failed = 0
+    no_pick = 0
+    errors = 0
     run_start = time.time()
 
     for i, dat_path in enumerate(dat_files):
@@ -730,7 +719,7 @@ def main(argv=None):
             logger.info("[%d/%d] %s already completed; skip", i + 1, len(dat_files), pair_name)
             continue
         logger.info("[%d/%d] %s", i + 1, len(dat_files), pair_name)
-        if process_one_pair(
+        status = process_one_pair(
             dat_path,
             args.out_dir,
             args.qc_plot_dir,
@@ -741,30 +730,40 @@ def main(argv=None):
             energy_dir=args.energy_dir,
             backend=args.backend,
             final_ct=args.final_ct,
-        ):
+        )
+        if status is PairStatus.SUCCESS:
             success += 1
+        elif status is PairStatus.NO_PICK:
+            no_pick += 1
         else:
-            failed += 1
+            errors += 1
 
         done = i + 1
         elapsed = time.time() - run_start
         avg = elapsed / done
         eta = avg * (len(dat_files) - done)
         logger.info(
-            "progress=%d/%d success=%d failed=%d avg=%.2fs ETA=%s",
+            "progress=%d/%d success=%d no_pick=%d errors=%d avg=%.2fs ETA=%s",
             done,
             len(dat_files),
             success,
-            failed,
+            no_pick,
+            errors,
             avg,
             format_seconds(eta),
         )
 
     logger.info("=" * 60)
-    logger.info("处理完成: 成功=%d, 失败=%d, 共=%d", success, failed, len(dat_files))
+    logger.info(
+        "处理完成: 成功=%d, 无有效拾取=%d, 异常=%d, 共=%d",
+        success,
+        no_pick,
+        errors,
+        len(dat_files),
+    )
     logger.info("频散曲线保存至: %s", args.out_dir)
     logger.info("=" * 60)
-    return 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
