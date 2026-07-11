@@ -698,6 +698,7 @@ def main(argv=None):
     )
     if not dat_files:
         logger.info("没有需要处理的 DAT，直接结束")
+        logger.info("处理完成: 成功=0, 无有效拾取=0, 异常=0, 共=0")
         return 0
 
     logger.info("正在加载 DisperPicker CNN 模型...")

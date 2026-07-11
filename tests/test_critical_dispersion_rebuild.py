@@ -305,6 +305,36 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertNotEqual(rc, 0)
 
+    def test_fully_resumed_shard_logs_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dat = root / "dat/1D.4001__1D.4002.dat"
+            write_dat(dat)
+            curves = root / "curves"
+            write_curve(curves / "GDisp.1D.4001__1D.4002.txt")
+            write_curve(curves / "CDisp.1D.4001__1D.4002.txt")
+            pixels = root / "pixels"
+            write_npz(pixels / "1D.4001__1D.4002.npz")
+
+            with self.assertLogs(self.runner.logger, level="INFO") as captured:
+                rc = self.runner.main(
+                    [
+                        "--dat_dir",
+                        str(dat.parent),
+                        "--out_dir",
+                        str(curves),
+                        "--energy_dir",
+                        str(pixels),
+                        "--dat_glob",
+                        "1D.*.dat",
+                        "--resume_existing",
+                        "--skip_qc_plot",
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertIn("处理完成", "\n".join(captured.output))
+
     def test_resume_rejects_legacy_failure_npz(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
