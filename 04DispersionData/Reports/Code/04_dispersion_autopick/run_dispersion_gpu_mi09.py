@@ -262,29 +262,6 @@ def pad_velocity_image(image, actual_start_v):
     return padded
 
 
-def _haversine_km(lat_a, lon_a, lat_b, lon_b):
-    radius_km = 6371.0
-    lat1 = np.radians(float(lat_a))
-    lat2 = np.radians(float(lat_b))
-    dlat = lat2 - lat1
-    dlon = np.radians(float(lon_b) - float(lon_a))
-    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
-    return float(2.0 * radius_km * np.arcsin(np.sqrt(a)))
-
-
-def _display_lon(lon):
-    lon = float(lon)
-    return lon + 360.0 if lon < 0 else lon
-
-
-def station_info_from_dat(dat_path):
-    with open(dat_path, "r", encoding="utf-8") as handle:
-        lon_a, lat_a = map(float, handle.readline().split()[:2])
-        lon_b, lat_b = map(float, handle.readline().split()[:2])
-    dist = _haversine_km(lat_a, lon_a, lat_b, lon_b)
-    return [dist, _display_lon(lon_a), lat_a, _display_lon(lon_b), lat_b]
-
-
 def _plot_dispersion_qc(
     group_image,
     phase_image,
