@@ -1,8 +1,12 @@
 import importlib.util
 import inspect
 import json
+import os
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +53,38 @@ def checkpoint_fixture_processor(task):
         "pair_name": task["pair_name"],
         "ok": True,
         "value": value,
+    }
+
+
+def benchmark_pool_fixture_processor(task):
+    started = time.perf_counter()
+    time.sleep(0.05)
+    return {
+        "task_id": str(task["task_id"]),
+        "pid": os.getpid(),
+        "started_monotonic_s": started,
+        "ended_monotonic_s": time.perf_counter(),
+    }
+
+
+def benchmark_pool_failure_fixture_processor(task):
+    if int(task["value"]) == 2:
+        raise RuntimeError("fixture worker failure")
+    time.sleep(0.05)
+    return {"task_id": str(task["task_id"]), "pid": os.getpid()}
+
+
+def benchmark_pool_memory_fixture_processor(task):
+    allocation = np.full(
+        int(task["allocation_bytes"]) // np.dtype(np.float64).itemsize,
+        float(int(task["value"]) + 1),
+        dtype=np.float64,
+    )
+    time.sleep(0.10)
+    return {
+        "task_id": str(task["task_id"]),
+        "pid": os.getpid(),
+        "allocation_sum": float(np.sum(allocation)),
     }
 
 
@@ -2054,12 +2090,32 @@ class RunWorkReproduceWangFigure4AllPairsTests(unittest.TestCase):
             available_memory_bytes=10,
         )
         benchmark_evidence = validation.StageBBenchmarkEvidence(
-            candidate_grid_elapsed_s=1.0,
-            ten_single_reference_fits_elapsed_s=1.0,
-            lambda_cv_elapsed_s=1.0,
-            twenty_half_samples_elapsed_s=1.0,
-            measured_peak_memory_bytes=1,
-            available_memory_bytes=10,
+            candidate_filter_worker_sum_s=0.04,
+            candidate_ridge_worker_sum_s=1.0,
+            candidate_worker_cost_sum_s=2.0,
+            candidate_pool_wall_s=0.2,
+            ten_fit_worker_sum_s=1.0,
+            cv_fit_worker_sum_s=2.0,
+            half_fit_worker_sum_s=3.0,
+            fit_pool_wall_s=0.5,
+            ftan_task_count=240,
+            ridge_search_count=6000,
+            ten_fit_task_count=10,
+            cv_fit_task_count=125,
+            half_fit_task_count=200,
+            ftan_requested_worker_count=2,
+            ftan_actual_worker_pids=(101, 102),
+            ftan_creator_pid=100,
+            ftan_pool_started_monotonic_s=1.0,
+            ftan_pool_ended_monotonic_s=2.0,
+            fit_requested_worker_count=2,
+            fit_actual_worker_pids=(103, 104),
+            fit_creator_pid=100,
+            fit_pool_started_monotonic_s=2.0,
+            fit_pool_ended_monotonic_s=3.0,
+            ftan_aggregate_peak_rss_bytes=1000,
+            fit_aggregate_peak_rss_bytes=2000,
+            available_memory_bytes=10_000,
             cache_hit_fraction=0.0,
             benchmark_input_sha256="f" * 64,
         )
@@ -2259,7 +2315,14 @@ class RunWorkReproduceWangFigure4AllPairsTests(unittest.TestCase):
                 1.0,
                 0.0,
             )
-            with mock.patch.object(
+            with mock.patch.dict(
+                os.environ,
+                {
+                    name: "1"
+                    for name in self.mod.FORMAL_STAGE_B_THREAD_ENVIRONMENT
+                },
+                clear=False,
+            ), mock.patch.object(
                 self.mod,
                 "audit_input_inventory_and_lineage",
                 return_value=inventory,
@@ -2373,6 +2436,14 @@ class RunWorkReproduceWangFigure4AllPairsTests(unittest.TestCase):
         self.assertEqual(measured["processed_pair_count"], 1)
         self.assertEqual(measured["successful_pair_count"], 1)
         self.assertEqual(measured["unexpected_pair_exception_count"], 0)
+        self.assertEqual(
+            measured["pool_lifecycle"]["status"],
+            "completed_inline",
+        )
+        self.assertEqual(
+            measured["pool_lifecycle"]["creator_pid"],
+            os.getpid(),
+        )
 
     def test_stage_b_candidate_synthetic_gate_executes_alpha_and_beta_checks(self):
         caches = ({}, {})
@@ -2418,7 +2489,14 @@ class RunWorkReproduceWangFigure4AllPairsTests(unittest.TestCase):
             )
             return 9
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ,
+            {
+                name: "1"
+                for name in self.mod.FORMAL_STAGE_B_THREAD_ENVIRONMENT
+            },
+            clear=False,
+        ), mock.patch.object(
             self.mod,
             "run_stage_a_test_suite",
             return_value=0,
@@ -2691,11 +2769,31 @@ class RunWorkReproduceWangFigure4AllPairsTests(unittest.TestCase):
 
     def test_stage_b_benchmark_adapter_requires_and_records_fixed_workload(self):
         workload = {
-            "candidate_grid_elapsed_s": 2.0,
-            "ten_single_reference_fits_elapsed_s": 3.0,
-            "lambda_cv_elapsed_s": 4.0,
-            "twenty_half_samples_elapsed_s": 5.0,
-            "measured_peak_memory_bytes": 1024,
+            "candidate_filter_worker_sum_s": 0.04,
+            "candidate_ridge_worker_sum_s": 1.0,
+            "candidate_worker_cost_sum_s": 2.0,
+            "candidate_pool_wall_s": 0.2,
+            "ten_fit_worker_sum_s": 3.0,
+            "cv_fit_worker_sum_s": 4.0,
+            "half_fit_worker_sum_s": 5.0,
+            "fit_pool_wall_s": 0.5,
+            "ftan_task_count": 240,
+            "ridge_search_count": 6000,
+            "ten_fit_task_count": 10,
+            "cv_fit_task_count": 125,
+            "half_fit_task_count": 200,
+            "ftan_requested_worker_count": 8,
+            "ftan_actual_worker_pids": tuple(range(101, 109)),
+            "ftan_creator_pid": 100,
+            "ftan_pool_started_monotonic_s": 1.0,
+            "ftan_pool_ended_monotonic_s": 2.0,
+            "fit_requested_worker_count": 8,
+            "fit_actual_worker_pids": tuple(range(109, 117)),
+            "fit_creator_pid": 100,
+            "fit_pool_started_monotonic_s": 2.0,
+            "fit_pool_ended_monotonic_s": 3.0,
+            "ftan_aggregate_peak_rss_bytes": 1024,
+            "fit_aggregate_peak_rss_bytes": 2048,
             "available_memory_bytes": 4096,
             "cache_hit_fraction": 0.8,
             "benchmark_input_sha256": "a" * 64,
@@ -2726,7 +2824,7 @@ class RunWorkReproduceWangFigure4AllPairsTests(unittest.TestCase):
             evidence,
             self.mod.wang_ftan_validation.StageBBenchmarkEvidence,
         )
-        self.assertEqual(evidence.candidate_grid_elapsed_s, 2.0)
+        self.assertEqual(evidence.candidate_worker_cost_sum_s, 2.0)
         with self.assertRaisesRegex(ValueError, "fixed workload"):
             self.mod.benchmark_stage_b_runtime(
                 candidate_count=299,
@@ -2743,6 +2841,238 @@ class RunWorkReproduceWangFigure4AllPairsTests(unittest.TestCase):
                 half_side_count=2,
                 half_start_count=5,
                 max_workers=8,
+            )
+
+    def test_benchmark_job_builders_preserve_fixed_workload(self):
+        self.assertTrue(
+            hasattr(self.mod, "build_stage_b_ftan_benchmark_jobs"),
+            "FTAN benchmark job builder is missing",
+        )
+        self.assertTrue(
+            hasattr(self.mod, "build_stage_b_fit_benchmark_jobs"),
+            "fit benchmark job builder is missing",
+        )
+        ftan_jobs = self.mod.build_stage_b_ftan_benchmark_jobs()
+        fit_jobs = self.mod.build_stage_b_fit_benchmark_jobs()
+        self.assertEqual(len(ftan_jobs), 240)
+        self.assertEqual(
+            len({str(job["task_id"]) for job in ftan_jobs}),
+            240,
+        )
+        self.assertEqual(
+            sum(int(job["beta_search_count"]) for job in ftan_jobs),
+            6000,
+        )
+        self.assertEqual(len(fit_jobs), 335)
+        self.assertEqual(
+            len({str(job["task_id"]) for job in fit_jobs}),
+            335,
+        )
+        group_counts = {
+            group: sum(job["group"] == group for job in fit_jobs)
+            for group in ("ten", "cv", "half")
+        }
+        self.assertEqual(group_counts, {"ten": 10, "cv": 125, "half": 200})
+        self.assertEqual(ftan_jobs, self.mod.build_stage_b_ftan_benchmark_jobs())
+        self.assertEqual(fit_jobs, self.mod.build_stage_b_fit_benchmark_jobs())
+
+    def test_parallel_benchmark_result_order_is_deterministic(self):
+        jobs = tuple({"task_id": f"task-{index}"} for index in range(3))
+        results = tuple(
+            {
+                "task_id": f"task-{index}",
+                "output_sha256": str(index) * 64,
+                "pid": 100 + index,
+                "elapsed_s": 0.01 * (index + 1),
+            }
+            for index in range(3)
+        )
+        forward = self.mod._conserve_stage_b_benchmark_results(
+            jobs,
+            results,
+            phase="fixture",
+        )
+        reversed_rows = self.mod._conserve_stage_b_benchmark_results(
+            jobs,
+            tuple(reversed(results)),
+            phase="fixture",
+        )
+        self.assertEqual(forward, reversed_rows)
+        self.assertEqual(
+            self.mod._stage_b_benchmark_result_sha256(forward),
+            self.mod._stage_b_benchmark_result_sha256(reversed_rows),
+        )
+        with self.assertRaisesRegex(RuntimeError, "task conservation"):
+            self.mod._conserve_stage_b_benchmark_results(
+                jobs,
+                results[:-1],
+                phase="fixture",
+            )
+        with self.assertRaisesRegex(RuntimeError, "task conservation"):
+            self.mod._conserve_stage_b_benchmark_results(
+                jobs,
+                results[:-1] + (results[0],),
+                phase="fixture",
+            )
+
+    def test_requested_workers_have_overlapping_work_intervals(self):
+        jobs = tuple({"task_id": f"job-{index}"} for index in range(8))
+        evidence = self.mod._execute_stage_b_benchmark_pool(
+            jobs,
+            evaluator=benchmark_pool_fixture_processor,
+            max_workers=4,
+        )
+        self.assertEqual(len(evidence["worker_pids"]), 4)
+        results = tuple(evidence["results"])
+        self.assertEqual(
+            {int(row["pid"]) for row in results},
+            set(evidence["worker_pids"]),
+        )
+        first_interval_by_pid = {}
+        for row in results:
+            process_id = int(row["pid"])
+            interval = (
+                float(row["started_monotonic_s"]),
+                float(row["ended_monotonic_s"]),
+            )
+            if (
+                process_id not in first_interval_by_pid
+                or interval[0] < first_interval_by_pid[process_id][0]
+            ):
+                first_interval_by_pid[process_id] = interval
+        self.assertLess(
+            max(start for start, _ in first_interval_by_pid.values()),
+            min(end for _, end in first_interval_by_pid.values()),
+        )
+        self.assertGreater(int(evidence["memory"]["peak_total_rss_bytes"]), 0)
+
+    def test_aggregate_rss_sampler_stops_after_worker_error(self):
+        before = {
+            thread.ident
+            for thread in threading.enumerate()
+            if thread.name == "stage-b-pool-rss-sampler"
+        }
+        jobs = tuple(
+            {"task_id": f"job-{index}", "value": index}
+            for index in range(8)
+        )
+        with self.assertRaisesRegex(RuntimeError, "fixture worker failure"):
+            self.mod._execute_stage_b_benchmark_pool(
+                jobs,
+                evaluator=benchmark_pool_failure_fixture_processor,
+                max_workers=4,
+            )
+        after = {
+            thread.ident
+            for thread in threading.enumerate()
+            if thread.name == "stage-b-pool-rss-sampler"
+        }
+        self.assertEqual(after, before)
+
+    def test_aggregate_rss_sampler_includes_live_workers(self):
+        jobs = tuple(
+            {
+                "task_id": f"memory-{index}",
+                "value": index,
+                "allocation_bytes": 4 * 1024 * 1024,
+            }
+            for index in range(4)
+        )
+        evidence = self.mod._execute_stage_b_benchmark_pool(
+            jobs,
+            evaluator=benchmark_pool_memory_fixture_processor,
+            max_workers=4,
+        )
+        memory = evidence["memory"]
+        rss_by_pid = {
+            int(pid): int(value)
+            for pid, value in memory["peak_rss_by_pid"].items()
+        }
+        expected = {os.getpid(), *evidence["worker_pids"]}
+        self.assertEqual(set(rss_by_pid), expected)
+        self.assertEqual(
+            int(memory["peak_total_rss_bytes"]),
+            sum(rss_by_pid.values()),
+        )
+        self.assertGreater(
+            int(memory["peak_total_rss_bytes"]),
+            rss_by_pid[os.getpid()],
+        )
+
+    def test_formal_stage_b_subprocess_requires_preimport_thread_limits(self):
+        code = (
+            "import sys; "
+            f"sys.path.insert(0, {str(MODULE_PATH.parent)!r}); "
+            "import run_work_reproduce_wang_figure4_allpairs as runner; "
+            "runner.validate_formal_stage_b_thread_contract(); "
+            "print('THREAD-CONTRACT-OK')"
+        )
+        environment = os.environ.copy()
+        required = (
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        )
+        environment.update({name: "1" for name in required})
+        passed = subprocess.run(
+            [sys.executable, "-c", code],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        self.assertEqual(passed.returncode, 0, passed.stdout)
+        self.assertIn("THREAD-CONTRACT-OK", passed.stdout)
+        environment.pop("MKL_NUM_THREADS")
+        failed = subprocess.run(
+            [sys.executable, "-c", code],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("MKL_NUM_THREADS=1", failed.stdout)
+
+    def test_benchmark_workers_report_single_thread_backends(self):
+        code = (
+            "import json, sys; "
+            f"sys.path.insert(0, {str(MODULE_PATH.parent)!r}); "
+            "import run_work_reproduce_wang_figure4_allpairs as runner; "
+            "runner.validate_formal_stage_b_thread_contract(); "
+            "print(json.dumps(runner.probe_stage_b_worker_threadpools(2), "
+            "sort_keys=True))"
+        )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "OMP_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+                "VECLIB_MAXIMUM_THREADS": "1",
+            }
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(len(payload), 2)
+        self.assertEqual(len({row["pid"] for row in payload}), 2)
+        for row in payload:
+            self.assertTrue(row["backends"])
+            self.assertTrue(
+                all(info["num_threads"] == 1 for info in row["backends"])
             )
 
     def test_uncached_benchmark_projection_matches_current_production_path(self):

@@ -7,8 +7,10 @@ import ast
 from dataclasses import dataclass, fields, is_dataclass
 import hashlib
 import json
+import math
 import multiprocessing as mp
 import os
+import time
 from types import MappingProxyType
 from typing import Callable, Dict, Iterable, Mapping, Sequence, Tuple
 
@@ -59,7 +61,8 @@ def execute_measurement_class_processes(
     *,
     evaluator: Callable[[object], object],
     max_workers: int,
-) -> Tuple[object, ...]:
+    return_audit: bool = False,
+):
     """Evaluate independent class jobs in a bounded fork process pool."""
 
     workers = int(max_workers)
@@ -67,28 +70,69 @@ def execute_measurement_class_processes(
         raise ValueError("max_workers must lie in [1, 24]")
     items = tuple(jobs)
     if not items:
-        return ()
+        audit = {
+            "status": "no_jobs",
+            "creator_pid": os.getpid(),
+            "requested_worker_count": 0,
+            "worker_pids": (),
+            "pool_started_monotonic_s": None,
+            "pool_ended_monotonic_s": None,
+        }
+        return ((), audit) if return_audit else ()
     if workers == 1:
-        return tuple(evaluator(job) for job in items)
+        started = time.perf_counter()
+        results = tuple(evaluator(job) for job in items)
+        ended = time.perf_counter()
+        audit = {
+            "status": "completed_inline",
+            "creator_pid": os.getpid(),
+            "requested_worker_count": 1,
+            "worker_pids": (),
+            "pool_started_monotonic_s": started,
+            "pool_ended_monotonic_s": ended,
+        }
+        return (results, audit) if return_audit else results
     if "fork" not in mp.get_all_start_methods():
         raise RuntimeError(
             "formal Stage B class parallelism requires multiprocessing fork"
         )
+    if mp.current_process().daemon:
+        raise RuntimeError("a daemon worker cannot create a class pool")
     global _MEASUREMENT_CLASS_PROCESS_EVALUATOR
     if _MEASUREMENT_CLASS_PROCESS_EVALUATOR is not None:
         raise RuntimeError("measurement-class process executor is not reentrant")
     _MEASUREMENT_CLASS_PROCESS_EVALUATOR = evaluator
+    creator_pid = os.getpid()
+    started = time.perf_counter()
+    context = mp.get_context("fork")
+    pool = context.Pool(processes=min(workers, len(items)))
+    worker_pids = tuple(
+        sorted(int(process.pid) for process in pool._pool)
+    )
     try:
-        context = mp.get_context("fork")
-        with context.Pool(processes=min(workers, len(items))) as pool:
-            results = pool.map(
-                _evaluate_measurement_class_process_job,
-                items,
-                chunksize=1,
-            )
+        results = pool.map(
+            _evaluate_measurement_class_process_job,
+            items,
+            chunksize=1,
+        )
+        pool.close()
+    except BaseException:
+        pool.terminate()
+        raise
     finally:
+        pool.join()
         _MEASUREMENT_CLASS_PROCESS_EVALUATOR = None
-    return tuple(results)
+    ended = time.perf_counter()
+    results = tuple(results)
+    audit = {
+        "status": "completed",
+        "creator_pid": creator_pid,
+        "requested_worker_count": min(workers, len(items)),
+        "worker_pids": worker_pids,
+        "pool_started_monotonic_s": started,
+        "pool_ended_monotonic_s": ended,
+    }
+    return (results, audit) if return_audit else results
 
 
 @dataclass(frozen=True)
@@ -655,36 +699,109 @@ class StageBBudgetResult:
 
 @dataclass(frozen=True)
 class StageBBenchmarkEvidence:
-    candidate_grid_elapsed_s: float
-    ten_single_reference_fits_elapsed_s: float
-    lambda_cv_elapsed_s: float
-    twenty_half_samples_elapsed_s: float
-    measured_peak_memory_bytes: int
+    candidate_filter_worker_sum_s: float
+    candidate_ridge_worker_sum_s: float
+    candidate_worker_cost_sum_s: float
+    candidate_pool_wall_s: float
+    ten_fit_worker_sum_s: float
+    cv_fit_worker_sum_s: float
+    half_fit_worker_sum_s: float
+    fit_pool_wall_s: float
+    ftan_task_count: int
+    ridge_search_count: int
+    ten_fit_task_count: int
+    cv_fit_task_count: int
+    half_fit_task_count: int
+    ftan_requested_worker_count: int
+    ftan_actual_worker_pids: Tuple[int, ...]
+    ftan_creator_pid: int
+    ftan_pool_started_monotonic_s: float
+    ftan_pool_ended_monotonic_s: float
+    fit_requested_worker_count: int
+    fit_actual_worker_pids: Tuple[int, ...]
+    fit_creator_pid: int
+    fit_pool_started_monotonic_s: float
+    fit_pool_ended_monotonic_s: float
+    ftan_aggregate_peak_rss_bytes: int
+    fit_aggregate_peak_rss_bytes: int
     available_memory_bytes: int
     cache_hit_fraction: float
     benchmark_input_sha256: str
 
     def __post_init__(self) -> None:
-        elapsed_names = (
-            "candidate_grid_elapsed_s",
-            "ten_single_reference_fits_elapsed_s",
-            "lambda_cv_elapsed_s",
-            "twenty_half_samples_elapsed_s",
+        timing_names = (
+            "candidate_filter_worker_sum_s",
+            "candidate_ridge_worker_sum_s",
+            "candidate_worker_cost_sum_s",
+            "candidate_pool_wall_s",
+            "ten_fit_worker_sum_s",
+            "cv_fit_worker_sum_s",
+            "half_fit_worker_sum_s",
+            "fit_pool_wall_s",
+            "ftan_pool_started_monotonic_s",
+            "ftan_pool_ended_monotonic_s",
+            "fit_pool_started_monotonic_s",
+            "fit_pool_ended_monotonic_s",
         )
-        elapsed = {
-            name: float(getattr(self, name)) for name in elapsed_names
+        timings = {
+            name: float(getattr(self, name)) for name in timing_names
         }
-        peak = int(self.measured_peak_memory_bytes)
+        count_names = (
+            "ftan_task_count",
+            "ridge_search_count",
+            "ten_fit_task_count",
+            "cv_fit_task_count",
+            "half_fit_task_count",
+            "ftan_requested_worker_count",
+            "ftan_creator_pid",
+            "fit_requested_worker_count",
+            "fit_creator_pid",
+            "ftan_aggregate_peak_rss_bytes",
+            "fit_aggregate_peak_rss_bytes",
+        )
+        counts = {name: int(getattr(self, name)) for name in count_names}
+        ftan_pids = tuple(int(value) for value in self.ftan_actual_worker_pids)
+        fit_pids = tuple(int(value) for value in self.fit_actual_worker_pids)
         available = int(self.available_memory_bytes)
         cache = float(self.cache_hit_fraction)
+        expected_cost = (
+            25.0 * timings["candidate_filter_worker_sum_s"]
+            + timings["candidate_ridge_worker_sum_s"]
+        )
         if (
             any(
                 not np.isfinite(value) or value <= 0
-                for value in elapsed.values()
+                for value in timings.values()
             )
-            or peak <= 0
+            or any(value <= 0 for value in counts.values())
+            or counts["ftan_task_count"] != 240
+            or counts["ridge_search_count"] != 6000
+            or counts["ten_fit_task_count"] != 10
+            or counts["cv_fit_task_count"] != 125
+            or counts["half_fit_task_count"] != 200
+            or not 1 <= counts["ftan_requested_worker_count"] <= 24
+            or not 1 <= counts["fit_requested_worker_count"] <= 24
+            or len(ftan_pids) != counts["ftan_requested_worker_count"]
+            or len(fit_pids) != counts["fit_requested_worker_count"]
+            or len(set(ftan_pids)) != len(ftan_pids)
+            or len(set(fit_pids)) != len(fit_pids)
+            or any(value <= 0 for value in ftan_pids + fit_pids)
+            or counts["ftan_creator_pid"] in ftan_pids
+            or counts["fit_creator_pid"] in fit_pids
+            or counts["ftan_creator_pid"] != counts["fit_creator_pid"]
+            or not np.isclose(
+                timings["candidate_worker_cost_sum_s"],
+                expected_cost,
+                rtol=1e-12,
+                atol=1e-12,
+            )
+            or timings["ftan_pool_started_monotonic_s"]
+            >= timings["ftan_pool_ended_monotonic_s"]
+            or timings["fit_pool_started_monotonic_s"]
+            >= timings["fit_pool_ended_monotonic_s"]
+            or timings["ftan_pool_ended_monotonic_s"]
+            > timings["fit_pool_started_monotonic_s"]
             or available <= 0
-            or peak > available
             or not np.isfinite(cache)
             or cache < 0
             or cache > 1
@@ -696,11 +813,21 @@ class StageBBenchmarkEvidence:
             )
         ):
             raise ValueError("StageBBenchmarkEvidence fields are inconsistent")
-        for name, value in elapsed.items():
+        for name, value in timings.items():
             object.__setattr__(self, name, value)
-        object.__setattr__(self, "measured_peak_memory_bytes", peak)
+        for name, value in counts.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "ftan_actual_worker_pids", ftan_pids)
+        object.__setattr__(self, "fit_actual_worker_pids", fit_pids)
         object.__setattr__(self, "available_memory_bytes", available)
         object.__setattr__(self, "cache_hit_fraction", cache)
+
+    @property
+    def measured_peak_memory_bytes(self) -> int:
+        return max(
+            self.ftan_aggregate_peak_rss_bytes,
+            self.fit_aggregate_peak_rss_bytes,
+        )
 
 
 @dataclass(frozen=True)
@@ -1795,10 +1922,15 @@ def evaluate_stage_b_budget(
     if workers > 24:
         raise ValueError("Stage B worker count cannot exceed 24")
     calls_per_class = STAGE_B_OPTIMIZER_CALLS_PER_CLASS
+    candidate_process_waves = (
+        int(math.ceil(normalized["stage_b_candidate_work_units"]))
+        + workers
+        - 1
+    ) // workers
     candidate_seconds = (
         normalized["candidate_benchmark_elapsed_s"]
-        * normalized["stage_b_candidate_work_units"]
         / normalized["candidate_benchmark_work_units"]
+        * candidate_process_waves
     )
     reference_process_waves = (classes + workers - 1) // workers
     reference_seconds = (
@@ -1824,8 +1956,9 @@ def evaluate_stage_b_budget(
         memory_fraction=memory_fraction,
         optimizer_calls_per_class=calls_per_class,
         candidate_projection_formula=(
-            "candidate_benchmark_elapsed_s * "
-            "stage_b_candidate_work_units / candidate_benchmark_work_units"
+            "candidate_benchmark_elapsed_s / "
+            "candidate_benchmark_work_units * "
+            "ceil(stage_b_candidate_work_units / worker_count)"
         ),
         reference_projection_formula=(
             "reference_benchmark_elapsed_s / "
@@ -1847,18 +1980,18 @@ def project_stage_b_budget_from_fixed_benchmark(
 
     if not isinstance(evidence, StageBBenchmarkEvidence):
         raise ValueError("fixed Stage B benchmark evidence is required")
-    reference_elapsed = (
-        evidence.ten_single_reference_fits_elapsed_s
-        + evidence.lambda_cv_elapsed_s
-        + evidence.twenty_half_samples_elapsed_s
+    reference_worker_sum = (
+        evidence.ten_fit_worker_sum_s
+        + evidence.cv_fit_worker_sum_s
+        + evidence.half_fit_worker_sum_s
     )
     return evaluate_stage_b_budget(
-        candidate_benchmark_elapsed_s=evidence.candidate_grid_elapsed_s,
+        candidate_benchmark_elapsed_s=evidence.candidate_worker_cost_sum_s,
         candidate_benchmark_work_units=(
             STAGE_B_BENCHMARK_WAVEFORM_COUNT
         ),
         stage_b_candidate_work_units=selected_pair_count,
-        reference_benchmark_elapsed_s=reference_elapsed,
+        reference_benchmark_elapsed_s=reference_worker_sum,
         reference_benchmark_optimizer_calls=(
             STAGE_B_BENCHMARK_OPTIMIZER_CALLS
         ),
@@ -3174,6 +3307,7 @@ def run_stage_b_validation(
     config_sha256: str,
     max_workers: int = 24,
     phase_matched_second_pass_ftan: object = None,
+    require_pool_lifecycle_audit: bool = False,
 ) -> StageBRunResult:
     """Execute the fixed Stage B scientific gate sequence.
 
@@ -3327,6 +3461,12 @@ def run_stage_b_validation(
         raise ValueError(
             "benchmark_stage_b must return fixed StageBBenchmarkEvidence"
         )
+    stage_b_main_pid = os.getpid()
+    if require_pool_lifecycle_audit and (
+        benchmark_evidence.ftan_creator_pid != stage_b_main_pid
+        or benchmark_evidence.fit_creator_pid != stage_b_main_pid
+    ):
+        raise ValueError("benchmark pools were not created by Stage B main PID")
     budget = project_stage_b_budget_from_fixed_benchmark(
         benchmark_evidence,
         selected_pair_count=len(selection.selected_pair_names),
@@ -3364,12 +3504,19 @@ def run_stage_b_validation(
                     benchmark_evidence.cache_hit_fraction
                 ),
                 "reference_projection_worker_count": workers,
+                "real_pair_pool_phase": {
+                    "status": "not_run_budget_rejected",
+                },
+                "measurement_class_pool_phase": {
+                    "status": "not_run_budget_rejected",
+                },
             },
         )
     selected_names = set(selection.selected_pair_names)
     measurement_by_candidate: Dict[str, Dict[str, object]] = {}
     classes: Dict[str, list] = {}
     all_classes: Dict[str, list] = {}
+    real_pair_pool_audits = []
     for candidate in grid:
         candidate_id = str(candidate["candidate_id"])
         measured = dict(
@@ -3378,6 +3525,16 @@ def run_stage_b_validation(
                 selection=selection,
             )
         )
+        pool_lifecycle = measured.get("pool_lifecycle")
+        if pool_lifecycle is not None:
+            real_pair_pool_audits.append(
+                {
+                    "candidate_id": candidate_id,
+                    **dict(pool_lifecycle),
+                }
+            )
+        elif require_pool_lifecycle_audit:
+            raise ValueError("real-pair pool lifecycle evidence is missing")
         count_fields = (
             "processed_pair_count",
             "successful_pair_count",
@@ -3769,10 +3926,11 @@ def run_stage_b_validation(
         )
 
     class_jobs = tuple(sorted(classes.items()))
-    class_outputs = execute_measurement_class_processes(
+    class_outputs, class_pool_audit = execute_measurement_class_processes(
         class_jobs,
         evaluator=evaluate_class,
         max_workers=workers,
+        return_audit=True,
     )
     class_results: Dict[str, Dict[str, object]] = {
         left_hash: _unpack_stage_b_class_result(payload)
@@ -3781,6 +3939,60 @@ def run_stage_b_validation(
     class_worker_pids = tuple(
         sorted({int(worker_pid) for _, _, worker_pid in class_outputs})
     )
+    real_pair_pool_phase = {
+        "status": (
+            "completed"
+            if real_pair_pool_audits
+            else "not_recorded_by_adapter"
+        ),
+        "candidate_pool_count": len(real_pair_pool_audits),
+        "pools": tuple(real_pair_pool_audits),
+    }
+    if require_pool_lifecycle_audit:
+        if len(real_pair_pool_audits) != len(grid):
+            raise ValueError("real-pair lifecycle count is incomplete")
+        ordered_intervals = [
+            (
+                float(row["pool_started_monotonic_s"]),
+                float(row["pool_ended_monotonic_s"]),
+            )
+            for row in real_pair_pool_audits
+        ]
+        if (
+            any(
+                int(row["creator_pid"]) != stage_b_main_pid
+                or row.get("status") not in ("completed", "completed_inline")
+                or start >= end
+                for row, (start, end) in zip(
+                    real_pair_pool_audits,
+                    ordered_intervals,
+                )
+            )
+            or benchmark_evidence.fit_pool_ended_monotonic_s
+            > ordered_intervals[0][0]
+            or any(
+                left[1] > right[0]
+                for left, right in zip(
+                    ordered_intervals,
+                    ordered_intervals[1:],
+                )
+            )
+            or int(class_pool_audit["creator_pid"]) != stage_b_main_pid
+            or (
+                bool(class_jobs)
+                and (
+                    class_pool_audit.get("status")
+                    not in ("completed", "completed_inline")
+                    or ordered_intervals[-1][1]
+                    > float(class_pool_audit["pool_started_monotonic_s"])
+                )
+            )
+            or (
+                not class_jobs
+                and class_pool_audit.get("status") != "no_jobs"
+            )
+        ):
+            raise ValueError("Stage B process pool lifecycles overlap or diverge")
     for left_hash, candidate_ids in sorted(all_classes.items()):
         if left_hash in class_results:
             continue
@@ -3907,6 +4119,8 @@ def run_stage_b_validation(
         ),
         "reference_worker_process_count": len(class_worker_pids),
         "reference_worker_pids": class_worker_pids,
+        "measurement_class_pool_phase": class_pool_audit,
+        "real_pair_pool_phase": real_pair_pool_phase,
         "fixed_thresholds": {
             "triplet_minimum_support": TRIPLET_MINIMUM_SUPPORT,
             "triplet_maximum_median_absolute_cycles": (

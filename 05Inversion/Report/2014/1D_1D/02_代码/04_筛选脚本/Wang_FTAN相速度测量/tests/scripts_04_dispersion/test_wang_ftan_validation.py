@@ -58,6 +58,40 @@ class WangFtanValidationTests(unittest.TestCase):
         cls.mod = load_module()
         cls.bensen = load_bensen_module()
 
+    def _parallel_benchmark_evidence(self, **overrides):
+        values = {
+            "candidate_filter_worker_sum_s": 0.04,
+            "candidate_ridge_worker_sum_s": 1.0,
+            "candidate_worker_cost_sum_s": 2.0,
+            "candidate_pool_wall_s": 0.2,
+            "ten_fit_worker_sum_s": 1.0,
+            "cv_fit_worker_sum_s": 2.0,
+            "half_fit_worker_sum_s": 3.0,
+            "fit_pool_wall_s": 0.5,
+            "ftan_task_count": 240,
+            "ridge_search_count": 6000,
+            "ten_fit_task_count": 10,
+            "cv_fit_task_count": 125,
+            "half_fit_task_count": 200,
+            "ftan_requested_worker_count": 2,
+            "ftan_actual_worker_pids": (101, 102),
+            "ftan_creator_pid": 100,
+            "ftan_pool_started_monotonic_s": 1.0,
+            "ftan_pool_ended_monotonic_s": 2.0,
+            "fit_requested_worker_count": 2,
+            "fit_actual_worker_pids": (103, 104),
+            "fit_creator_pid": 100,
+            "fit_pool_started_monotonic_s": 2.0,
+            "fit_pool_ended_monotonic_s": 3.0,
+            "ftan_aggregate_peak_rss_bytes": 1000,
+            "fit_aggregate_peak_rss_bytes": 2000,
+            "available_memory_bytes": 10_000,
+            "cache_hit_fraction": 0.0,
+            "benchmark_input_sha256": "f" * 64,
+        }
+        values.update(overrides)
+        return self.mod.StageBBenchmarkEvidence(**values)
+
     def test_stage_b_stratified_selection_is_deterministic_and_adds_closure_edges(
         self,
     ):
@@ -835,12 +869,119 @@ class WangFtanValidationTests(unittest.TestCase):
         self.assertEqual([row["value"] for row in rows], list(range(8)))
         self.assertNotIn(parent_pid, worker_pids)
         self.assertEqual(len(worker_pids), 2)
+        audited_rows, audit = self.mod.execute_measurement_class_processes(
+            tuple(range(8)),
+            evaluator=evaluator,
+            max_workers=2,
+            return_audit=True,
+        )
+        self.assertEqual([row["value"] for row in audited_rows], list(range(8)))
+        self.assertEqual(audit["status"], "completed")
+        self.assertEqual(audit["creator_pid"], parent_pid)
+        self.assertEqual(audit["requested_worker_count"], 2)
+        self.assertEqual(len(audit["worker_pids"]), 2)
+        self.assertLess(
+            audit["pool_started_monotonic_s"],
+            audit["pool_ended_monotonic_s"],
+        )
         with self.assertRaisesRegex(ValueError, r"\[1, 24\]"):
             self.mod.execute_measurement_class_processes(
                 (1,),
                 evaluator=evaluator,
                 max_workers=25,
             )
+
+    def test_parallel_benchmark_evidence_requires_complete_worker_contract(
+        self,
+    ):
+        parameter_names = set(
+            inspect.signature(
+                self.mod.StageBBenchmarkEvidence
+            ).parameters
+        )
+        expected = {
+            "candidate_filter_worker_sum_s",
+            "candidate_ridge_worker_sum_s",
+            "candidate_worker_cost_sum_s",
+            "candidate_pool_wall_s",
+            "ten_fit_worker_sum_s",
+            "cv_fit_worker_sum_s",
+            "half_fit_worker_sum_s",
+            "fit_pool_wall_s",
+            "ftan_task_count",
+            "ridge_search_count",
+            "ten_fit_task_count",
+            "cv_fit_task_count",
+            "half_fit_task_count",
+            "ftan_requested_worker_count",
+            "ftan_actual_worker_pids",
+            "ftan_creator_pid",
+            "ftan_pool_started_monotonic_s",
+            "ftan_pool_ended_monotonic_s",
+            "fit_requested_worker_count",
+            "fit_actual_worker_pids",
+            "fit_creator_pid",
+            "fit_pool_started_monotonic_s",
+            "fit_pool_ended_monotonic_s",
+            "ftan_aggregate_peak_rss_bytes",
+            "fit_aggregate_peak_rss_bytes",
+        }
+        self.assertTrue(
+            expected.issubset(parameter_names),
+            sorted(expected.difference(parameter_names)),
+        )
+
+    def test_parallel_budget_applies_worker_waves_once(self):
+        result = self.mod.evaluate_stage_b_budget(
+            candidate_benchmark_elapsed_s=20.0,
+            candidate_benchmark_work_units=20.0,
+            stage_b_candidate_work_units=48.0,
+            reference_benchmark_elapsed_s=335.0,
+            reference_benchmark_optimizer_calls=335,
+            distinct_measurement_class_count=48,
+            worker_count=24,
+            measured_peak_memory_bytes=1,
+            available_memory_bytes=10,
+        )
+        self.assertEqual(result.projected_candidate_seconds, 2.0)
+        self.assertEqual(result.projected_reference_seconds, 1906.0)
+
+    def test_parallel_benchmark_evidence_rejects_incomplete_pool_contract(self):
+        self._parallel_benchmark_evidence()
+        invalid_cases = (
+            {"ftan_actual_worker_pids": (101,)},
+            {"fit_actual_worker_pids": (103,)},
+            {"fit_pool_started_monotonic_s": 1.5},
+            {"cv_fit_task_count": 124},
+            {"candidate_worker_cost_sum_s": 1.0},
+        )
+        for overrides in invalid_cases:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(ValueError, "inconsistent"):
+                    self._parallel_benchmark_evidence(**overrides)
+
+    def test_parallel_budget_ignores_pool_wall(self):
+        first = self._parallel_benchmark_evidence(
+            candidate_pool_wall_s=0.1,
+            fit_pool_wall_s=0.2,
+        )
+        second = self._parallel_benchmark_evidence(
+            candidate_pool_wall_s=0.9,
+            fit_pool_wall_s=0.8,
+        )
+        first_budget = self.mod.project_stage_b_budget_from_fixed_benchmark(
+            first,
+            selected_pair_count=48,
+            maximum_measurement_class_count=48,
+            worker_count=24,
+        )
+        second_budget = self.mod.project_stage_b_budget_from_fixed_benchmark(
+            second,
+            selected_pair_count=48,
+            maximum_measurement_class_count=48,
+            worker_count=24,
+        )
+        self.assertEqual(first_budget, second_budget)
 
     def test_stage_b_orchestrator_stops_before_science_when_budget_fails(self):
         grid = self.mod.build_candidate_grid(
@@ -856,15 +997,13 @@ class WangFtanValidationTests(unittest.TestCase):
 
         def benchmark_stage_b(**kwargs):
             events.append(("benchmark", kwargs))
-            return self.mod.StageBBenchmarkEvidence(
-                candidate_grid_elapsed_s=86_400.0,
-                ten_single_reference_fits_elapsed_s=86_400.0,
-                lambda_cv_elapsed_s=86_400.0,
-                twenty_half_samples_elapsed_s=86_400.0,
-                measured_peak_memory_bytes=1,
-                available_memory_bytes=10,
-                cache_hit_fraction=0.0,
-                benchmark_input_sha256="f" * 64,
+            return self._parallel_benchmark_evidence(
+                candidate_filter_worker_sum_s=1.0,
+                candidate_ridge_worker_sum_s=86_375.0,
+                candidate_worker_cost_sum_s=86_400.0,
+                ten_fit_worker_sum_s=86_400.0,
+                cv_fit_worker_sum_s=86_400.0,
+                half_fit_worker_sum_s=86_400.0,
             )
 
         def forbidden(*args, **kwargs):
@@ -905,6 +1044,14 @@ class WangFtanValidationTests(unittest.TestCase):
         self.assertEqual(events[0][1]["candidate_count"], 300)
         self.assertEqual(events[0][1]["synthetic_waveform_count"], 20)
         self.assertEqual(events[0][1]["half_start_count"], 5)
+        self.assertEqual(
+            result.audit["real_pair_pool_phase"]["status"],
+            "not_run_budget_rejected",
+        )
+        self.assertEqual(
+            result.audit["measurement_class_pool_phase"]["status"],
+            "not_run_budget_rejected",
+        )
 
     def test_stage_b_orchestrator_runs_one_reference_per_bitwise_class(self):
         grid = self.mod.build_candidate_grid(
@@ -992,15 +1139,8 @@ class WangFtanValidationTests(unittest.TestCase):
 
         def benchmark_stage_b(**kwargs):
             events.append("benchmark")
-            return self.mod.StageBBenchmarkEvidence(
-                candidate_grid_elapsed_s=1.0,
-                ten_single_reference_fits_elapsed_s=1.0,
-                lambda_cv_elapsed_s=1.0,
-                twenty_half_samples_elapsed_s=1.0,
-                measured_peak_memory_bytes=1,
-                available_memory_bytes=10,
+            return self._parallel_benchmark_evidence(
                 cache_hit_fraction=0.5,
-                benchmark_input_sha256="f" * 64,
             )
 
         def measure_candidate(**kwargs):
@@ -1339,16 +1479,7 @@ class WangFtanValidationTests(unittest.TestCase):
         )
 
         def benchmark_stage_b(**kwargs):
-            return self.mod.StageBBenchmarkEvidence(
-                candidate_grid_elapsed_s=1.0,
-                ten_single_reference_fits_elapsed_s=1.0,
-                lambda_cv_elapsed_s=1.0,
-                twenty_half_samples_elapsed_s=1.0,
-                measured_peak_memory_bytes=1,
-                available_memory_bytes=10,
-                cache_hit_fraction=0.0,
-                benchmark_input_sha256="f" * 64,
-            )
+            return self._parallel_benchmark_evidence()
 
         result = self.mod.run_stage_b_validation(
             inventory_rows=[

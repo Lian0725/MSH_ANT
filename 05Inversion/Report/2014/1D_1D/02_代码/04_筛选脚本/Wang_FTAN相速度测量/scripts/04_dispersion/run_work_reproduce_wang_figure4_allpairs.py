@@ -9,11 +9,13 @@ import hashlib
 import html
 import json
 import math
+import multiprocessing as mp
 import os
 import platform
 import resource
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -31,6 +33,8 @@ except ModuleNotFoundError:
     yaml = None
 from scipy.optimize import minimize
 from scipy.signal import windows
+import threadpoolctl
+from threadpoolctl import threadpool_info
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -64,6 +68,13 @@ from bensen_phase_ftan import (
 
 
 TARGET_PERIODS_S = (3.0, 3.5, 4.0, 5.0)
+FORMAL_STAGE_B_THREAD_ENVIRONMENT = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
 FIGURE4_PERIODS_S = (3.0, 4.0, 5.0)
 FORMAL_REQUIRED_OUTPUTS = (
     "metadata.json",
@@ -92,6 +103,75 @@ FORMAL_REQUIRED_OUTPUTS = (
     "report.html",
     "run.log",
 )
+
+
+def validate_formal_stage_b_thread_contract() -> None:
+    """Require numerical thread limits inherited before formal Python start."""
+
+    invalid = [
+        f"{name}=1"
+        for name in FORMAL_STAGE_B_THREAD_ENVIRONMENT
+        if os.environ.get(name) != "1"
+    ]
+    if invalid:
+        raise RuntimeError(
+            "formal Stage B requires pre-import thread limits: "
+            + ", ".join(invalid)
+        )
+
+
+_STAGE_B_THREADPOOL_SNAPSHOT_CACHE = None
+
+
+def _stage_b_threadpool_snapshot() -> Tuple[Dict[str, object], ...]:
+    global _STAGE_B_THREADPOOL_SNAPSHOT_CACHE
+    if _STAGE_B_THREADPOOL_SNAPSHOT_CACHE is None:
+        rows = tuple(
+            {
+                "user_api": str(info.get("user_api", "")),
+                "internal_api": str(info.get("internal_api", "")),
+                "prefix": str(info.get("prefix", "")),
+                "num_threads": int(info.get("num_threads", 0)),
+            }
+            for info in threadpool_info()
+        )
+        if not rows or any(row["num_threads"] != 1 for row in rows):
+            raise RuntimeError(
+                "formal Stage B numerical backends must each use one thread"
+            )
+        _STAGE_B_THREADPOOL_SNAPSHOT_CACHE = rows
+    return tuple(dict(row) for row in _STAGE_B_THREADPOOL_SNAPSHOT_CACHE)
+
+
+def _probe_stage_b_worker_threadpool(_job: int) -> Dict[str, object]:
+    time.sleep(0.05)
+    return {
+        "pid": os.getpid(),
+        "backends": _stage_b_threadpool_snapshot(),
+    }
+
+
+def probe_stage_b_worker_threadpools(
+    max_workers: int,
+) -> Tuple[Dict[str, object], ...]:
+    """Return real backend thread counts from an explicit fork pool."""
+
+    validate_formal_stage_b_thread_contract()
+    workers = int(max_workers)
+    if workers < 1 or workers > 24:
+        raise ValueError("Stage B probe workers must lie in [1, 24]")
+    context = mp.get_context("fork")
+    with context.Pool(processes=workers) as pool:
+        rows = tuple(
+            pool.map(
+                _probe_stage_b_worker_threadpool,
+                range(workers),
+                chunksize=1,
+            )
+        )
+    if len({int(row["pid"]) for row in rows}) != workers:
+        raise RuntimeError("Stage B thread probe did not engage every worker")
+    return tuple(sorted(rows, key=lambda row: int(row["pid"])))
 SNR_THRESHOLD = 4.0
 SIGNAL_VMIN_KM_S = 1.6
 SIGNAL_VMAX_KM_S = 5.0
@@ -4668,13 +4748,52 @@ def measure_stage_b_candidate_from_tasks(
         raise ValueError("Stage B measurement workers must lie in [1, 24]")
     if synthetic_validation_status not in ("accepted", "rejected"):
         raise ValueError("Stage B synthetic validation status is invalid")
+    if not tasks:
+        raise ValueError("Stage B candidate requires selected real pair tasks")
     if workers == 1:
+        pool_started = time.perf_counter()
         results = tuple(process_one_pair(task) for task in tasks)
+        pool_ended = time.perf_counter()
+        pool_lifecycle = {
+            "status": "completed_inline",
+            "creator_pid": os.getpid(),
+            "requested_worker_count": 1,
+            "worker_pids": (),
+            "pool_started_monotonic_s": pool_started,
+            "pool_ended_monotonic_s": pool_ended,
+        }
     else:
-        with Pool(processes=min(workers, len(tasks))) as pool:
+        if mp.current_process().daemon:
+            raise RuntimeError("a daemon worker cannot create a real-pair pool")
+        if "fork" not in mp.get_all_start_methods():
+            raise RuntimeError("Stage B real-pair pool requires fork")
+        creator_pid = os.getpid()
+        requested_workers = min(workers, len(tasks))
+        pool_started = time.perf_counter()
+        context = mp.get_context("fork")
+        pool = context.Pool(processes=requested_workers)
+        worker_pids = tuple(
+            sorted(int(process.pid) for process in pool._pool)
+        )
+        try:
             results = tuple(
                 pool.imap(process_one_pair, tasks, chunksize=1)
             )
+            pool.close()
+        except BaseException:
+            pool.terminate()
+            raise
+        finally:
+            pool.join()
+        pool_ended = time.perf_counter()
+        pool_lifecycle = {
+            "status": "completed",
+            "creator_pid": creator_pid,
+            "requested_worker_count": requested_workers,
+            "worker_pids": worker_pids,
+            "pool_started_monotonic_s": pool_started,
+            "pool_ended_monotonic_s": pool_ended,
+        }
     rows: List[Dict[str, object]] = []
     failures: List[Dict[str, object]] = []
     for result in results:
@@ -4736,6 +4855,7 @@ def measure_stage_b_candidate_from_tasks(
         "successful_pair_count": successful_pair_count,
         "expected_scientific_rejection_count": expected_rejection_count,
         "unexpected_pair_exception_count": unexpected_exception_count,
+        "pool_lifecycle": pool_lifecycle,
     }
 
 
@@ -5059,6 +5179,392 @@ def project_uncached_candidate_grid_seconds(
     return filter_elapsed * beta_count + ridge_elapsed
 
 
+def build_stage_b_ftan_benchmark_jobs() -> Tuple[Dict[str, object], ...]:
+    """Return the exact deterministic 240-task FTAN benchmark schedule."""
+
+    config = FtanConfig()
+    beta_count = len(config.beta1_candidates) * len(config.beta2_candidates)
+    jobs = []
+    for waveform_index in range(20):
+        for convention in PhaseConvention:
+            for alpha in config.alpha_candidates:
+                jobs.append(
+                    {
+                        "task_id": (
+                            f"ftan-{waveform_index:02d}-"
+                            f"{convention.name}-a{float(alpha):g}"
+                        ),
+                        "waveform_index": waveform_index,
+                        "phase_convention": convention.name,
+                        "alpha": float(alpha),
+                        "beta_search_count": beta_count,
+                    }
+                )
+    return tuple(jobs)
+
+
+def build_stage_b_fit_benchmark_jobs() -> Tuple[Dict[str, object], ...]:
+    """Return the exact deterministic 10/125/200 optimizer schedule."""
+
+    lambdas = wang_ftan_validation.REFERENCE_LAMBDA_GRID
+    jobs = []
+    for index in range(10):
+        jobs.append(
+            {
+                "task_id": f"fit-ten-{index:03d}",
+                "group": "ten",
+                "lambda_s": 0.01,
+                "lambda_g": 0.01,
+                "maxiter": 500,
+            }
+        )
+    for index in range(25 * 5):
+        jobs.append(
+            {
+                "task_id": f"fit-cv-{index:03d}",
+                "group": "cv",
+                "lambda_s": float(lambdas[index % len(lambdas)]),
+                "lambda_g": float(
+                    lambdas[(index // len(lambdas)) % len(lambdas)]
+                ),
+                "maxiter": 200,
+            }
+        )
+    for index in range(20 * 2 * 5):
+        jobs.append(
+            {
+                "task_id": f"fit-half-{index:03d}",
+                "group": "half",
+                "lambda_s": 0.01,
+                "lambda_g": 0.01,
+                "maxiter": 300,
+            }
+        )
+    return tuple(jobs)
+
+
+def _conserve_stage_b_benchmark_results(
+    jobs: Sequence[Dict[str, object]],
+    results: Sequence[Dict[str, object]],
+    *,
+    phase: str,
+) -> Tuple[Dict[str, object], ...]:
+    """Reject partial/duplicate worker output and return stable task order."""
+
+    expected_ids = tuple(str(job["task_id"]) for job in jobs)
+    returned = tuple(dict(row) for row in results)
+    returned_ids = tuple(str(row.get("task_id", "")) for row in returned)
+    if (
+        not phase
+        or len(set(expected_ids)) != len(expected_ids)
+        or len(returned) != len(expected_ids)
+        or len(set(returned_ids)) != len(returned_ids)
+        or set(returned_ids) != set(expected_ids)
+    ):
+        raise RuntimeError(f"{phase} benchmark task conservation failed")
+    return tuple(sorted(returned, key=lambda row: str(row["task_id"])))
+
+
+def _stage_b_benchmark_result_sha256(
+    results: Sequence[Dict[str, object]],
+) -> str:
+    """Hash deterministic scientific worker output, excluding timing/PIDs."""
+
+    rows = _conserve_stage_b_benchmark_results(
+        tuple({"task_id": str(row["task_id"])} for row in results),
+        results,
+        phase="result-summary",
+    )
+    scientific_rows = [
+        {
+            key: row[key]
+            for key in (
+                "task_id",
+                "group",
+                "ridge_search_count",
+                "output_sha256",
+            )
+            if key in row
+        }
+        for row in rows
+    ]
+    return _canonical_json_sha256(scientific_rows)
+
+
+def _validate_stage_b_worker_threadpool_results(
+    results: Sequence[Dict[str, object]],
+    worker_pids: Sequence[int],
+    *,
+    phase: str,
+) -> None:
+    expected = {int(value) for value in worker_pids}
+    observed = {int(row["pid"]) for row in results}
+    if observed != expected:
+        raise RuntimeError(f"{phase} benchmark did not engage every worker")
+    for row in results:
+        backends = tuple(dict(info) for info in row.get("threadpool_info", ()))
+        if not backends or any(
+            int(info.get("num_threads", 0)) != 1 for info in backends
+        ):
+            raise RuntimeError(
+                f"{phase} benchmark worker threadpool contract failed"
+            )
+
+
+_STAGE_B_FTAN_BENCHMARK_CONTEXT = None
+_STAGE_B_FIT_BENCHMARK_CONTEXT = None
+
+
+def _read_process_rss_bytes(pid: int) -> int:
+    """Read one Linux process RSS without adding a runtime dependency."""
+
+    process_id = int(pid)
+    if process_id <= 0:
+        raise ValueError("RSS PID must be positive")
+    if platform.system() != "Linux":
+        completed = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(process_id)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            raise ProcessLookupError(process_id)
+        return int(completed.stdout.strip()) * 1024
+    statm = Path(f"/proc/{process_id}/statm").read_text(
+        encoding="ascii"
+    )
+    fields = statm.split()
+    if len(fields) < 2:
+        raise ValueError("Linux statm RSS field is unavailable")
+    return int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+
+
+def _start_pool_rss_sampler(
+    *,
+    parent_pid: int,
+    worker_pids: Sequence[int],
+    interval_s: float = 0.02,
+    rss_reader=_read_process_rss_bytes,
+):
+    """Start a background aggregate-RSS sampler for one live process pool."""
+
+    parent = int(parent_pid)
+    workers = tuple(sorted(int(value) for value in worker_pids))
+    interval = float(interval_s)
+    if (
+        parent <= 0
+        or not workers
+        or any(value <= 0 for value in workers)
+        or len(set(workers)) != len(workers)
+        or not np.isfinite(interval)
+        or interval <= 0
+    ):
+        raise ValueError("RSS sampler inputs are invalid")
+    stop = threading.Event()
+    state = {
+        "peak_total_rss_bytes": 0,
+        "peak_timestamp_monotonic_s": None,
+        "peak_rss_by_pid": {},
+        "sample_count": 0,
+        "parent_pid": parent,
+        "worker_pids": workers,
+        "interval_s": interval,
+    }
+
+    def sample_once() -> None:
+        rss_by_pid = {}
+        for process_id in (parent,) + workers:
+            try:
+                rss_by_pid[process_id] = int(rss_reader(process_id))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        state["sample_count"] += 1
+        if not all(process_id in rss_by_pid for process_id in workers):
+            return
+        total = int(sum(rss_by_pid.values()))
+        if total > int(state["peak_total_rss_bytes"]):
+            state["peak_total_rss_bytes"] = total
+            state["peak_timestamp_monotonic_s"] = time.perf_counter()
+            state["peak_rss_by_pid"] = dict(rss_by_pid)
+
+    def run() -> None:
+        sample_once()
+        while not stop.wait(interval):
+            sample_once()
+
+    thread = threading.Thread(
+        target=run,
+        name="stage-b-pool-rss-sampler",
+        daemon=False,
+    )
+    thread.start()
+    return stop, thread, state
+
+
+def _execute_stage_b_benchmark_pool(
+    jobs: Sequence[Dict[str, object]],
+    *,
+    evaluator,
+    max_workers: int,
+) -> Dict[str, object]:
+    """Run one fixed benchmark phase in an owned, measured fork pool."""
+
+    items = tuple(dict(job) for job in jobs)
+    workers = int(max_workers)
+    if not items or workers < 1 or workers > 24:
+        raise ValueError("benchmark pool inputs are invalid")
+    if mp.current_process().daemon:
+        raise RuntimeError("a daemon worker cannot create a benchmark pool")
+    if "fork" not in mp.get_all_start_methods():
+        raise RuntimeError("Stage B benchmark requires multiprocessing fork")
+    creator_pid = os.getpid()
+    started = time.perf_counter()
+    context = mp.get_context("fork")
+    pool = context.Pool(processes=workers)
+    worker_pids = tuple(sorted(int(process.pid) for process in pool._pool))
+    stop, sampler, memory = _start_pool_rss_sampler(
+        parent_pid=creator_pid,
+        worker_pids=worker_pids,
+    )
+    try:
+        results = tuple(pool.map(evaluator, items, chunksize=1))
+        pool.close()
+    except BaseException:
+        pool.terminate()
+        raise
+    finally:
+        pool.join()
+        stop.set()
+        sampler.join(timeout=5.0)
+        if sampler.is_alive():
+            raise RuntimeError("benchmark RSS sampler did not stop")
+    ended = time.perf_counter()
+    if int(memory["peak_total_rss_bytes"]) <= 0:
+        raise RuntimeError("benchmark RSS sampler captured no complete sample")
+    return {
+        "results": results,
+        "creator_pid": creator_pid,
+        "worker_pids": worker_pids,
+        "started_monotonic_s": started,
+        "ended_monotonic_s": ended,
+        "pool_wall_s": ended - started,
+        "memory": memory,
+    }
+
+
+def _evaluate_stage_b_ftan_benchmark_job(job: Dict[str, object]):
+    context = _STAGE_B_FTAN_BENCHMARK_CONTEXT
+    if context is None:
+        raise RuntimeError("FTAN benchmark context is unavailable")
+    row = dict(job)
+    task_id = str(row["task_id"])
+    started = time.perf_counter()
+    waveform = context["waveforms"][int(row["waveform_index"])]
+    convention = PhaseConvention[str(row["phase_convention"])]
+    prepared = prepare_phase_waveform(
+        context["time_s"],
+        waveform,
+        convention,
+    )
+    filter_started = time.perf_counter()
+    bank = gaussian_filter_bank(
+        prepared,
+        dt_s=context["dt_s"],
+        periods_s=context["periods"],
+        alpha=float(row["alpha"]),
+    )
+    amplitude = np.vstack(
+        [
+            np.interp(
+                context["sample_times"],
+                context["time_s"],
+                envelope,
+                left=0.0,
+                right=0.0,
+            )
+            for envelope in bank.envelope
+        ]
+    )
+    energy = normalized_log_energy(amplitude, period_axis=0)
+    maximum = np.max(amplitude, axis=1, keepdims=True)
+    normalized_amplitude = np.zeros_like(amplitude)
+    np.divide(
+        amplitude,
+        maximum,
+        out=normalized_amplitude,
+        where=maximum > 0,
+    )
+    filter_elapsed = time.perf_counter() - filter_started
+    ridge_elapsed = 0.0
+    ridge_digest = hashlib.sha256()
+    ridge_count = 0
+    for beta1 in context["beta1_candidates"]:
+        for beta2 in context["beta2_candidates"]:
+            ridge_started = time.perf_counter()
+            ridges = find_candidate_ridges(
+                scaled_log_energy=energy,
+                normalized_envelope_amplitude=normalized_amplitude,
+                periods_s=context["periods"],
+                velocity_axis_km_s=context["velocity"],
+                beta1=beta1,
+                beta2=beta2,
+                max_candidates=3,
+            )
+            ridge_elapsed += time.perf_counter() - ridge_started
+            ridge_count += 1
+            ridge_digest.update(repr(ridges).encode("utf-8"))
+    ended = time.perf_counter()
+    return {
+        "task_id": task_id,
+        "pid": os.getpid(),
+        "threadpool_info": _stage_b_threadpool_snapshot(),
+        "started_monotonic_s": started,
+        "ended_monotonic_s": ended,
+        "filter_elapsed_s": filter_elapsed,
+        "ridge_elapsed_s": ridge_elapsed,
+        "ridge_search_count": ridge_count,
+        "output_sha256": ridge_digest.hexdigest(),
+    }
+
+
+def _evaluate_stage_b_fit_benchmark_job(job: Dict[str, object]):
+    context = _STAGE_B_FIT_BENCHMARK_CONTEXT
+    if context is None:
+        raise RuntimeError("fit benchmark context is unavailable")
+    row = dict(job)
+    started = time.perf_counter()
+    objective = lambda candidate: reference_fit_objective(
+        candidate,
+        context["observations"],
+        lambda_s=float(row["lambda_s"]),
+        lambda_g=float(row["lambda_g"]),
+        periods_s=context["periods"],
+    )
+    result = minimize(
+        objective,
+        context["start_curve"],
+        method="L-BFGS-B",
+        bounds=context["bounds"],
+        options={"maxiter": int(row["maxiter"])},
+    )
+    ended = time.perf_counter()
+    digest = hashlib.sha256()
+    digest.update(np.asarray(result.x, dtype="<f8").tobytes(order="C"))
+    digest.update(str(bool(result.success)).encode("ascii"))
+    return {
+        "task_id": str(row["task_id"]),
+        "group": str(row["group"]),
+        "pid": os.getpid(),
+        "threadpool_info": _stage_b_threadpool_snapshot(),
+        "started_monotonic_s": started,
+        "ended_monotonic_s": ended,
+        "elapsed_s": ended - started,
+        "output_sha256": digest.hexdigest(),
+    }
+
+
 def _run_stage_b_benchmark_workload(*, max_workers: int) -> Dict[str, object]:
     """Execute the frozen 20-waveform and 335-fit Stage B benchmark."""
 
@@ -5084,71 +5590,59 @@ def _run_stage_b_benchmark_workload(*, max_workers: int) -> Dict[str, object]:
         input_digest.update(
             np.asarray(waveform, dtype="<f8").tobytes(order="C")
         )
-    filter_stage_elapsed = 0.0
-    ridge_elapsed = 0.0
     sample_times = 20.0 / velocity
-    for waveform in waveforms:
-        for convention in PhaseConvention:
-            prepared = prepare_phase_waveform(
-                time_s,
-                waveform,
-                convention,
-            )
-            for alpha in config.alpha_candidates:
-                filter_started = time.perf_counter()
-                bank = gaussian_filter_bank(
-                    prepared,
-                    dt_s=dt_s,
-                    periods_s=periods,
-                    alpha=alpha,
-                )
-                amplitude = np.vstack(
-                    [
-                        np.interp(
-                            sample_times,
-                            time_s,
-                            envelope,
-                            left=0.0,
-                            right=0.0,
-                        )
-                        for envelope in bank.envelope
-                    ]
-                )
-                energy = normalized_log_energy(amplitude, period_axis=0)
-                maximum = np.max(amplitude, axis=1, keepdims=True)
-                normalized_amplitude = np.zeros_like(amplitude)
-                np.divide(
-                    amplitude,
-                    maximum,
-                    out=normalized_amplitude,
-                    where=maximum > 0,
-                )
-                filter_stage_elapsed += time.perf_counter() - filter_started
-                for beta1 in config.beta1_candidates:
-                    for beta2 in config.beta2_candidates:
-                        ridge_started = time.perf_counter()
-                        find_candidate_ridges(
-                            scaled_log_energy=energy,
-                            normalized_envelope_amplitude=(
-                                normalized_amplitude
-                            ),
-                            periods_s=periods,
-                            velocity_axis_km_s=velocity,
-                            beta1=beta1,
-                            beta2=beta2,
-                            max_candidates=3,
-                        )
-                        ridge_elapsed += time.perf_counter() - ridge_started
-    candidate_elapsed = max(
-        project_uncached_candidate_grid_seconds(
-            filter_bank_elapsed_s=filter_stage_elapsed,
-            ridge_elapsed_s=ridge_elapsed,
-            beta_grid_count=(
-                len(config.beta1_candidates)
-                * len(config.beta2_candidates)
-            ),
-        ),
+    global _STAGE_B_FTAN_BENCHMARK_CONTEXT
+    if _STAGE_B_FTAN_BENCHMARK_CONTEXT is not None:
+        raise RuntimeError("FTAN benchmark executor is not reentrant")
+    _STAGE_B_FTAN_BENCHMARK_CONTEXT = {
+        "waveforms": tuple(waveforms),
+        "time_s": time_s,
+        "dt_s": dt_s,
+        "periods": periods,
+        "velocity": velocity,
+        "sample_times": sample_times,
+        "beta1_candidates": config.beta1_candidates,
+        "beta2_candidates": config.beta2_candidates,
+    }
+    try:
+        ftan_pool = _execute_stage_b_benchmark_pool(
+            build_stage_b_ftan_benchmark_jobs(),
+            evaluator=_evaluate_stage_b_ftan_benchmark_job,
+            max_workers=workers,
+        )
+    finally:
+        _STAGE_B_FTAN_BENCHMARK_CONTEXT = None
+    ftan_results = _conserve_stage_b_benchmark_results(
+        build_stage_b_ftan_benchmark_jobs(),
+        ftan_pool["results"],
+        phase="FTAN",
+    )
+    _validate_stage_b_worker_threadpool_results(
+        ftan_results,
+        ftan_pool["worker_pids"],
+        phase="FTAN",
+    )
+    if (
+        len(ftan_results) != 240
+        or len({str(row["task_id"]) for row in ftan_results}) != 240
+        or sum(int(row["ridge_search_count"]) for row in ftan_results)
+        != 6000
+    ):
+        raise RuntimeError("FTAN benchmark task conservation failed")
+    filter_worker_sum = max(
+        sum(float(row["filter_elapsed_s"]) for row in ftan_results),
         np.finfo(float).eps,
+    )
+    ridge_worker_sum = max(
+        sum(float(row["ridge_elapsed_s"]) for row in ftan_results),
+        np.finfo(float).eps,
+    )
+    candidate_worker_cost = project_uncached_candidate_grid_seconds(
+        filter_bank_elapsed_s=filter_worker_sum,
+        ridge_elapsed_s=ridge_worker_sum,
+        beta_grid_count=(
+            len(config.beta1_candidates) * len(config.beta2_candidates)
+        ),
     )
     observation_rows = []
     for index in range(2000):
@@ -5170,49 +5664,95 @@ def _run_stage_b_benchmark_workload(*, max_workers: int) -> Dict[str, object]:
     observations = tuple(observation_rows)
     start_curve = np.full(periods.size, 0.4)
     bounds = tuple((1.0 / 4.0, 1.0 / 1.6) for _ in periods)
-
-    def timed_fits(count: int, *, maxiter: int, vary_lambda: bool) -> float:
-        started = time.perf_counter()
-        lambdas = wang_ftan_validation.REFERENCE_LAMBDA_GRID
-        for index in range(int(count)):
-            lambda_s = lambdas[index % len(lambdas)] if vary_lambda else 0.01
-            lambda_g = (
-                lambdas[(index // len(lambdas)) % len(lambdas)]
-                if vary_lambda
-                else 0.01
-            )
-            objective = lambda candidate: reference_fit_objective(
-                candidate,
-                observations,
-                lambda_s=lambda_s,
-                lambda_g=lambda_g,
-                periods_s=periods,
-            )
-            minimize(
-                objective,
-                start_curve,
-                method="L-BFGS-B",
-                bounds=bounds,
-                options={"maxiter": int(maxiter)},
-            )
-        return max(
-            time.perf_counter() - started,
+    global _STAGE_B_FIT_BENCHMARK_CONTEXT
+    if _STAGE_B_FIT_BENCHMARK_CONTEXT is not None:
+        raise RuntimeError("fit benchmark executor is not reentrant")
+    _STAGE_B_FIT_BENCHMARK_CONTEXT = {
+        "observations": observations,
+        "periods": periods,
+        "start_curve": start_curve,
+        "bounds": bounds,
+    }
+    try:
+        fit_pool = _execute_stage_b_benchmark_pool(
+            build_stage_b_fit_benchmark_jobs(),
+            evaluator=_evaluate_stage_b_fit_benchmark_job,
+            max_workers=workers,
+        )
+    finally:
+        _STAGE_B_FIT_BENCHMARK_CONTEXT = None
+    fit_results = _conserve_stage_b_benchmark_results(
+        build_stage_b_fit_benchmark_jobs(),
+        fit_pool["results"],
+        phase="fit",
+    )
+    _validate_stage_b_worker_threadpool_results(
+        fit_results,
+        fit_pool["worker_pids"],
+        phase="fit",
+    )
+    group_counts = {
+        group: sum(str(row["group"]) == group for row in fit_results)
+        for group in ("ten", "cv", "half")
+    }
+    if (
+        len(fit_results) != 335
+        or len({str(row["task_id"]) for row in fit_results}) != 335
+        or group_counts != {"ten": 10, "cv": 125, "half": 200}
+    ):
+        raise RuntimeError("fit benchmark task conservation failed")
+    fit_worker_sums = {
+        group: max(
+            sum(
+                float(row["elapsed_s"])
+                for row in fit_results
+                if str(row["group"]) == group
+            ),
             np.finfo(float).eps,
         )
-
-    ten_elapsed = timed_fits(10, maxiter=500, vary_lambda=False)
-    cv_elapsed = timed_fits(25 * 5, maxiter=200, vary_lambda=True)
-    half_elapsed = timed_fits(20 * 2 * 5, maxiter=300, vary_lambda=False)
-    process_peak = max(1, _peak_resident_memory_bytes())
+        for group in ("ten", "cv", "half")
+    }
     available = max(1, _available_memory_bytes())
-    aggregate_peak = process_peak * min(workers, len(waveforms))
-    peak = min(aggregate_peak, available)
     return {
-        "candidate_grid_elapsed_s": candidate_elapsed,
-        "ten_single_reference_fits_elapsed_s": ten_elapsed,
-        "lambda_cv_elapsed_s": cv_elapsed,
-        "twenty_half_samples_elapsed_s": half_elapsed,
-        "measured_peak_memory_bytes": peak,
+        "candidate_filter_worker_sum_s": filter_worker_sum,
+        "candidate_ridge_worker_sum_s": ridge_worker_sum,
+        "candidate_worker_cost_sum_s": candidate_worker_cost,
+        "candidate_pool_wall_s": float(ftan_pool["pool_wall_s"]),
+        "ten_fit_worker_sum_s": fit_worker_sums["ten"],
+        "cv_fit_worker_sum_s": fit_worker_sums["cv"],
+        "half_fit_worker_sum_s": fit_worker_sums["half"],
+        "fit_pool_wall_s": float(fit_pool["pool_wall_s"]),
+        "ftan_task_count": len(ftan_results),
+        "ridge_search_count": sum(
+            int(row["ridge_search_count"]) for row in ftan_results
+        ),
+        "ten_fit_task_count": group_counts["ten"],
+        "cv_fit_task_count": group_counts["cv"],
+        "half_fit_task_count": group_counts["half"],
+        "ftan_requested_worker_count": workers,
+        "ftan_actual_worker_pids": tuple(ftan_pool["worker_pids"]),
+        "ftan_creator_pid": int(ftan_pool["creator_pid"]),
+        "ftan_pool_started_monotonic_s": float(
+            ftan_pool["started_monotonic_s"]
+        ),
+        "ftan_pool_ended_monotonic_s": float(
+            ftan_pool["ended_monotonic_s"]
+        ),
+        "fit_requested_worker_count": workers,
+        "fit_actual_worker_pids": tuple(fit_pool["worker_pids"]),
+        "fit_creator_pid": int(fit_pool["creator_pid"]),
+        "fit_pool_started_monotonic_s": float(
+            fit_pool["started_monotonic_s"]
+        ),
+        "fit_pool_ended_monotonic_s": float(
+            fit_pool["ended_monotonic_s"]
+        ),
+        "ftan_aggregate_peak_rss_bytes": int(
+            ftan_pool["memory"]["peak_total_rss_bytes"]
+        ),
+        "fit_aggregate_peak_rss_bytes": int(
+            fit_pool["memory"]["peak_total_rss_bytes"]
+        ),
         "available_memory_bytes": available,
         "cache_hit_fraction": 0.0,
         "benchmark_input_sha256": input_digest.hexdigest(),
@@ -5522,6 +6062,7 @@ def run_stage_b_from_tasks(
 ) -> int:
     """Adapt real HDF5 tasks to the fixed Stage B validation orchestrator."""
 
+    validate_formal_stage_b_thread_contract()
     output = Path(output_dir)
     ensure_dir(output)
     if _canonical_json_sha256(input_inventory) != input_inventory_sha256:
@@ -5640,6 +6181,7 @@ def run_stage_b_from_tasks(
         code_sha256=code_sha256,
         config_sha256=config_sha256,
         max_workers=max_workers,
+        require_pool_lifecycle_audit=True,
     )
 
 
@@ -5689,6 +6231,11 @@ def run_stage_a_test_suite(output_dir: Path) -> int:
         "return_code": int(completed.returncode),
         "python_executable": sys.executable,
         "python_version": sys.version,
+        "threadpoolctl_version": threadpoolctl.__version__,
+        "thread_environment": {
+            name: os.environ.get(name)
+            for name in FORMAL_STAGE_B_THREAD_ENVIRONMENT
+        },
         "command": command,
         "test_files": list(test_paths),
         "test_file_sha256": {
